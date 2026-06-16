@@ -765,9 +765,7 @@ export function NewChatLandingScreen() {
   // Approval mode for Codex (codex --approval-mode). Only meaningful for
   // the codex-native wrapper; ignored otherwise. Lives in the footer
   // tray's Advanced settings menu.
-  const [approvalMode, setApprovalMode] = useState<string>(
-    CODEX_NATIVE_DEFAULT_APPROVAL_MODE,
-  );
+  const [approvalMode, setApprovalMode] = useState<string>(CODEX_NATIVE_DEFAULT_APPROVAL_MODE);
   // Per-session brain-harness override for bundle agents (polly / debby).
   // null = the agent spec's declared harness (no override sent); cleared on
   // every agent switch so a pick never leaks across agents.
@@ -1801,10 +1799,7 @@ export function NewChatLandingScreen() {
                         <div className="px-2 pt-1.5 pb-0.5 text-[11px] font-medium text-muted-foreground">
                           Approval mode
                         </div>
-                        <ApprovalModeOptions
-                          value={approvalMode}
-                          onValueChange={setApprovalMode}
-                        />
+                        <ApprovalModeOptions value={approvalMode} onValueChange={setApprovalMode} />
                       </>
                     )}
                   </DropdownMenuContent>
