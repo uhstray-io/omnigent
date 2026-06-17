@@ -57,6 +57,7 @@ from omnigent.runner.resource_registry import (
     CLAUDE_NATIVE_TERMINAL_ROLE,
     CODEX_NATIVE_TERMINAL_ROLE,
     OMNIGENT_REPL_TERMINAL_ROLE,
+    OPENCODE_NATIVE_TERMINAL_ROLE,
     PI_NATIVE_TERMINAL_ROLE,
     SessionResourceRegistry,
     TerminalExitEvent,
@@ -280,6 +281,11 @@ _COST_POPUP_REPOP_TASKS: set[asyncio.Task[Any]] = set()
 # Background Codex app-server instances for host-spawned codex-native
 # runners, kept referenced so they aren't garbage-collected mid-run.
 _AUTO_CODEX_APP_SERVERS: dict[str, Any] = {}
+
+# Background OpenCode ``opencode serve`` instances for host-spawned
+# opencode-native runners, kept referenced so they aren't garbage-collected
+# mid-run (mirrors ``_AUTO_CODEX_APP_SERVERS``).
+_AUTO_OPENCODE_SERVERS: dict[str, Any] = {}
 
 # Bound repeated terminal GET miss logs from tight client poll loops.
 _TERMINAL_LOOKUP_MISS_LOG_INTERVAL_S = 10.0
@@ -649,6 +655,311 @@ async def _codex_native_launch_config(
         fork_source_external_id=fork_source_external_id,
         fork_carry_history=fork_carry_history,
     )
+
+
+@dataclasses.dataclass(frozen=True)
+class _OpenCodeNativeLaunchConfig:
+    """
+    Persisted launch config for runner-owned OpenCode terminals.
+
+    :param workspace: Workspace cwd for ``opencode serve`` and the TUI.
+    :param policy_server_url: Omnigent server URL for the forwarder.
+    :param terminal_launch_args: User pass-through OpenCode CLI args.
+    :param model_override: Persisted model override, or ``None``.
+    :param external_session_id: Existing OpenCode session id to resume.
+    """
+
+    workspace: Path
+    policy_server_url: str
+    terminal_launch_args: list[str] | None
+    model_override: str | None
+    external_session_id: str | None
+
+
+async def _opencode_native_launch_config(
+    *,
+    session_id: str,
+    server_client: httpx.AsyncClient | None,
+) -> _OpenCodeNativeLaunchConfig:
+    """
+    Fetch and validate persisted OpenCode launch config for a session.
+
+    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
+    :param server_client: Runner Omnigent server client.
+    :returns: Parsed launch config.
+    :raises RuntimeError: If the snapshot or required runner env is missing.
+    """
+    if server_client is None:
+        raise RuntimeError("server_client is required for runner-owned OpenCode terminals.")
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Could not fetch OpenCode launch config for {session_id!r}.") from exc
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Could not fetch OpenCode launch config for {session_id!r}: "
+            f"GET /v1/sessions returned {resp.status_code}."
+        )
+    try:
+        snapshot = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Could not fetch OpenCode launch config for {session_id!r}: invalid JSON."
+        ) from exc
+    if not isinstance(snapshot, dict):
+        raise RuntimeError(
+            f"Could not fetch OpenCode launch config for {session_id!r}: "
+            "snapshot was not a JSON object."
+        )
+    terminal_launch_args = snapshot.get("terminal_launch_args")
+    if terminal_launch_args is not None and not (
+        isinstance(terminal_launch_args, list)
+        and all(isinstance(arg, str) for arg in terminal_launch_args)
+    ):
+        raise RuntimeError(f"Invalid terminal_launch_args for OpenCode session {session_id!r}.")
+    model_override = snapshot.get("model_override")
+    if model_override is not None:
+        if not isinstance(model_override, str) or not model_override:
+            raise RuntimeError(f"Invalid model_override for OpenCode session {session_id!r}.")
+        try:
+            validate_model_override(model_override)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid model_override for OpenCode session {session_id!r}: {exc}"
+            ) from exc
+    external_session_id = snapshot.get("external_session_id")
+    if external_session_id is not None and (
+        not isinstance(external_session_id, str) or not external_session_id
+    ):
+        raise RuntimeError(f"Invalid external_session_id for OpenCode session {session_id!r}.")
+    session_workspace = snapshot.get("workspace")
+    if session_workspace is not None and (
+        not isinstance(session_workspace, str) or not session_workspace
+    ):
+        raise RuntimeError(f"Invalid workspace for OpenCode session {session_id!r}.")
+    return _OpenCodeNativeLaunchConfig(
+        workspace=_codex_session_workspace(session_workspace),
+        policy_server_url=_required_runner_env("RUNNER_SERVER_URL"),
+        terminal_launch_args=terminal_launch_args,
+        model_override=model_override,
+        external_session_id=external_session_id,
+    )
+
+
+async def _auto_create_opencode_terminal(
+    session_id: str,
+    resource_registry: SessionResourceRegistry,
+    publish_event: Callable[[str, dict[str, Any]], None],
+    *,
+    agent_spec: Any | None = None,
+    server_client: httpx.AsyncClient | None = None,
+) -> SessionResourceView:
+    """
+    Auto-create an OpenCode terminal for an opencode-native session.
+
+    Mirrors :func:`_auto_create_codex_terminal`, substituting ``opencode
+    serve`` / ``opencode attach`` for Codex's app-server/remote transport:
+    boots a per-session ``opencode serve`` process, resumes-or-creates the
+    OpenCode session, persists bridge state + ``external_session_id``,
+    starts the SSE forwarder, then registers the ``opencode attach`` TUI as
+    a streamable terminal resource attached to that server.
+
+    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
+    :param resource_registry: Registry used to launch the terminal.
+    :param publish_event: Per-session SSE emitter for the new terminal.
+    :param agent_spec: Optional resolved agent spec (os_env + model).
+    :param server_client: Runner Omnigent server HTTP client.
+    :returns: The created terminal resource view.
+    """
+    from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
+    from omnigent.opencode_native_app_server import (
+        OpenCodeNativeServer,
+        build_opencode_attach_args,
+        opencode_terminal_env,
+    )
+    from omnigent.opencode_native_bridge import (
+        OpenCodeNativeBridgeState,
+        clear_bridge_state,
+        prepare_bridge_dir,
+        write_bridge_state,
+    )
+    from omnigent.opencode_native_forwarder import OpenCodeNativeForwarder
+
+    launch_config = await _opencode_native_launch_config(
+        session_id=session_id,
+        server_client=server_client,
+    )
+    workspace = str(launch_config.workspace)
+    bridge_dir = prepare_bridge_dir(session_id)
+    # Cancel any surviving forwarder first so its teardown closes the OLD
+    # server, then clear stale bridge state so web injection waits for the
+    # new launch's URL/session instead of a dead one.
+    await _cancel_auto_forwarder_task(session_id)
+    leftover = _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+    if leftover is not None:
+        with contextlib.suppress(Exception):
+            await leftover.close()
+    clear_bridge_state(bridge_dir)
+
+    model_override = launch_config.model_override or _opencode_native_model_from_spec(agent_spec)
+    server = OpenCodeNativeServer(bridge_dir=bridge_dir, workspace=launch_config.workspace)
+    await server.start()
+    _AUTO_OPENCODE_SERVERS[session_id] = server
+
+    try:
+        client = server.client()
+        try:
+            opencode_session_id: str | None = None
+            if launch_config.external_session_id is not None:
+                existing = await client.get_session(launch_config.external_session_id)
+                if existing is not None:
+                    opencode_session_id = existing.id
+            if opencode_session_id is None:
+                created = await client.create_session({"title": f"omnigent:{session_id}"})
+                opencode_session_id = created.id
+                # Persist the OpenCode session id so a later relaunch resumes
+                # it (best effort, like codex-native).
+                if server_client is not None:
+                    with contextlib.suppress(httpx.HTTPError):
+                        await server_client.patch(
+                            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+                            json={"external_session_id": opencode_session_id},
+                            timeout=10.0,
+                        )
+        finally:
+            await client.aclose()
+
+        write_bridge_state(
+            bridge_dir,
+            OpenCodeNativeBridgeState(
+                session_id=session_id,
+                server_base_url=server.base_url,
+                opencode_session_id=opencode_session_id,
+                auth_secret=server.auth_secret,
+                xdg_data_home=str(server.xdg_data_home),
+                xdg_config_home=str(server.xdg_config_home),
+                model_override=model_override,
+                workspace=workspace,
+            ),
+        )
+    except Exception:
+        await server.close()
+        _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+        raise
+
+    # Start the SSE forwarder in the background so session creation never
+    # blocks on it. The forwarder owns its OpenCode client for the stream
+    # lifetime; ``server_client`` is the runner's Omnigent client. The
+    # supervisor closes the ``opencode serve`` subprocess when forwarding
+    # ends (cancelled on session teardown), mirroring the codex forwarder's
+    # ``finally`` — else one server orphans per session.
+    if server_client is not None:
+        forwarder = OpenCodeNativeForwarder(
+            session_id=session_id,
+            opencode_session_id=opencode_session_id,
+            opencode_client=server.client(),
+            server_client=server_client,
+            bridge_dir=bridge_dir,
+            workspace=workspace,
+        )
+        forwarder_task = asyncio.create_task(
+            _supervise_opencode_forwarder(session_id, server, forwarder),
+            name=f"opencode-forwarder-{session_id}",
+        )
+        _register_auto_forwarder_task(session_id, forwarder_task)
+
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
+    try:
+        terminal_view = await resource_registry.launch_auxiliary_terminal(
+            session_id=session_id,
+            terminal_name="opencode",
+            session_key="main",
+            resource_role=OPENCODE_NATIVE_TERMINAL_ROLE,
+            parent_os_env=agent_os_env,
+            spec=TerminalEnvSpec(
+                os_env=OSEnvSpec(
+                    type="caller_process",
+                    cwd=workspace,
+                    sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+                ),
+                command=server.opencode_path,
+                args=build_opencode_attach_args(
+                    server_url=server.base_url,
+                    workspace=workspace,
+                    session_id=opencode_session_id,
+                    opencode_args=tuple(launch_config.terminal_launch_args or ()),
+                ),
+                env=opencode_terminal_env(server),
+                scrollback=100_000,
+                tmux_allow_passthrough=True,
+                tmux_start_on_attach=False,
+            ),
+        )
+        publish_event(
+            session_id,
+            {
+                "type": "session.resource.created",
+                "resource": session_resource_view_to_dict(terminal_view),
+            },
+        )
+    except Exception:
+        await _cancel_auto_forwarder_task(session_id)
+        await server.close()
+        _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+        raise
+
+    _logger.info("Auto-created opencode terminal + forwarder for session %s", session_id)
+    return terminal_view
+
+
+async def _supervise_opencode_forwarder(
+    session_id: str,
+    server: Any,
+    forwarder: Any,
+) -> None:
+    """
+    Run the OpenCode SSE forwarder, closing the server when it ends.
+
+    Mirrors the codex forwarder task's ``finally``: when forwarding stops
+    (the SSE connection dropped or the task was cancelled on session
+    teardown) the per-session ``opencode serve`` subprocess is ours to
+    stop, else it orphans one process per session.
+
+    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
+    :param server: The :class:`OpenCodeNativeServer` to close on exit.
+    :param forwarder: The :class:`OpenCodeNativeForwarder` to run.
+    :returns: None.
+    """
+    try:
+        await forwarder.run()
+    finally:
+        leftover = _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+        if leftover is not None:
+            with contextlib.suppress(Exception):
+                await leftover.close()
+        elif server is not None:
+            with contextlib.suppress(Exception):
+                await server.close()
+
+
+def _opencode_native_model_from_spec(agent_spec: Any | None) -> str | None:
+    """
+    Resolve the OpenCode default model from a resolved agent spec.
+
+    :param agent_spec: Optional resolved agent spec.
+    :returns: The spec's executor model, or ``None``.
+    """
+    if agent_spec is None:
+        return None
+    try:
+        from omnigent.runtime.workflow import _resolve_spec_model
+
+        return _resolve_spec_model(getattr(agent_spec, "spec", agent_spec))
+    except Exception:  # noqa: BLE001 - model resolution is best effort.
+        return None
 
 
 def _pi_args_have_session_control(args: list[str]) -> bool:
@@ -4299,6 +4610,7 @@ def create_runner_app(
     _session_comment_relays: dict[str, Any] = {}
     _codex_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _pi_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
+    _opencode_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     # Per-session lock guarding the claude-native terminal auto-create in
     # ``create_session``. Two ``POST /v1/sessions`` calls can land
     # concurrently on a host-launched runner — ``_on_runner_connect``
@@ -10637,6 +10949,42 @@ def create_runner_app(
                         session_id,
                     )
                     return _native_terminal_start_error_response(exc, "Pi")
+            return JSONResponse(
+                status_code=200,
+                content=session_resource_view_to_dict(terminal_view),
+            )
+
+        if (
+            body.get("ensure_native_terminal")
+            and terminal_name == "opencode"
+            and session_key == "main"
+        ):
+            opencode_terminal_id = terminal_resource_id("opencode", "main")
+            ensure_lock = _opencode_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
+            async with ensure_lock:
+                existing = await resource_registry.get_terminal_resource(
+                    session_id, opencode_terminal_id
+                )
+                if existing is not None:
+                    return JSONResponse(
+                        status_code=200,
+                        content=session_resource_view_to_dict(existing),
+                    )
+                try:
+                    opencode_agent_spec = await _resolve_session_agent_spec(session_id)
+                    terminal_view = await _auto_create_opencode_terminal(
+                        session_id,
+                        resource_registry,
+                        _publish_event,
+                        agent_spec=opencode_agent_spec,
+                        server_client=server_client,
+                    )
+                except Exception as exc:
+                    _logger.exception(
+                        "OpenCode terminal ensure failed for session=%s",
+                        session_id,
+                    )
+                    return _native_terminal_start_error_response(exc, "OpenCode")
             return JSONResponse(
                 status_code=200,
                 content=session_resource_view_to_dict(terminal_view),
