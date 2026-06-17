@@ -84,9 +84,9 @@ Maintainers work from a filtered view: `is:issue is:open label:P0-critical,P1-hi
 
 The bot assigns escalated issues to a maintainer based on **domain expertise, balanced by load**:
 
-1. **Route by domain.** The `comp:*` label maps to domain experts — e.g. server, runner, repr, web UI, policies, harnesses. Maintained as a config file (`.github/triage/domain-owners.yml`) so teams update it without touching CI.
+1. **Route by domain.** The `comp:*` label maps to a file path pattern, which maps to a team via CODEOWNERS — single source of truth for "who owns what", used for both PR reviews and issue assignment. No separate config to maintain.
 
-2. **Balance within the domain.** Among eligible experts, assign to whoever has the fewest open assigned issues. If no domain match, fall back to the full maintainer list with the same least-loaded logic.
+2. **Balance within the domain.** Among the CODEOWNERS team members, assign to whoever has the fewest open assigned issues. If no domain match, fall back to the full maintainer list with the same least-loaded logic.
 
 Maintainers can always reassign. The bot doesn't re-assign after initial routing.
 
@@ -151,20 +151,7 @@ Duplicates get a 3-day grace period. Reporter can react 👎 to prevent closure.
 
 ### CODEOWNERS
 
-```
-* @omnigent-ai/maintainers
-
-/omnigent/inner/          @omnigent-ai/core
-/omnigent/inner/egress/   @omnigent-ai/core
-/omnigent/inner/sandbox/  @omnigent-ai/core
-/omnigent/spec/           @omnigent-ai/core
-/ap-web/                  @omnigent-ai/web
-/tests/e2e/               @omnigent-ai/core
-/tests/e2e_ui/            @omnigent-ai/web
-/.github/                 @omnigent-ai/infra
-```
-
-*(Adjust team names to match actual GitHub team structure.)*
+Add a `.github/CODEOWNERS` file mapping file paths to teams. This serves double duty: gates PR reviews (GitHub native) and drives issue auto-assignment (the triage bot reads it to route `comp:*` labels to the right team).
 
 ### Update CONTRIBUTING.md
 
