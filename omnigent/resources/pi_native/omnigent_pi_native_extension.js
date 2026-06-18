@@ -206,8 +206,17 @@ function startInboxPoller(pi, config, handleInterrupt) {
           // Cap reached: surface the dropped follow-up without faking a turn
           // failure. The runner treats external_session_status:failed as
           // terminal for native sub-agents, so use a non-content conversation
-          // error item and consume the file to stop the spin.
+          // error item and consume the file to stop the spin. Include the
+          // message id and a short content preview so an operator can identify
+          // what was lost (data loss; the file is unlinked below).
           deliverAttempts.delete(key);
+          const droppedId = id ?? "(no id)";
+          const preview =
+            typeof payload.content === "string"
+              ? payload.content.length > 80
+                ? `${payload.content.slice(0, 80)}…`
+                : payload.content
+              : "";
           postEvent(config, {
             type: "external_conversation_item",
             data: {
@@ -217,7 +226,9 @@ function startInboxPoller(pi, config, handleInterrupt) {
                 source: "execution",
                 code: "pi_followup_delivery_dropped",
                 message:
-                  "Omnigent: a queued follow-up message could not be delivered to Pi and was dropped.",
+                  `Omnigent: a queued follow-up message (id ${droppedId}) could ` +
+                  `not be delivered to Pi after ${MAX_DELIVER_ATTEMPTS} attempts ` +
+                  `and was dropped. Content preview: ${JSON.stringify(preview)}`,
               },
             },
           });

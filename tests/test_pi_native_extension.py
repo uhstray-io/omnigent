@@ -129,6 +129,10 @@ require(extensionPath)(pi);
   assert.ok(dropNote, JSON.stringify(postedEvents));
   assert.equal(dropNote.data.item_data.source, "execution");
   assert.match(dropNote.data.response_id, /^pi-deliver-dropped-/);
+  // The note must be actionable: include the dropped message id and a preview
+  // of its content so an operator can identify what was lost.
+  assert.match(dropNote.data.item_data.message, /msg-1/);
+  assert.match(dropNote.data.item_data.message, /follow up/);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exit(1);
