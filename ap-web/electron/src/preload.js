@@ -44,7 +44,10 @@ contextBridge.exposeInMainWorld("omnigentDesktop", {
    */
   onNotificationActivated: (callback) => {
     const listener = (_event, path) => {
-      if (typeof path === "string" && path) callback(path);
+      // Defense-in-depth: only forward in-app, same-origin paths. A leading
+      // "/" rejects absolute/cross-origin URLs and `javascript:` shapes before
+      // the renderer routes on the value, even if main ever sends junk.
+      if (typeof path === "string" && path.startsWith("/")) callback(path);
     };
     ipcRenderer.on("omnigent:notification-activated", listener);
     return () => ipcRenderer.removeListener("omnigent:notification-activated", listener);

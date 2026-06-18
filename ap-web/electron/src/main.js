@@ -1682,18 +1682,22 @@ function registerIpc() {
     const navigatePath = typeof params?.navigatePath === "string" ? params.navigatePath : "";
     // Focus the window that fired the notification (so a click lands on the
     // right one in a multi-window setup), falling back to any open window.
-    // Then tell that window's SPA to navigate to the notification's
-    // conversation — focusing alone left the user on whatever chat was open.
     notification.on("click", () => {
       const win = BrowserWindow.fromWebContents(event.sender) ?? activeWindow();
       if (win) {
         if (win.isMinimized()) win.restore();
         win.focus();
       }
-      // Route only the originating window (it owns that conversation's state);
-      // guard against a sender reloaded/closed since the toast was posted.
+      // Route only the originating window (it owns that conversation's state).
+      // isDestroyed() and send() aren't atomic — the window can close between
+      // them — so the try/catch absorbs the benign "Object has been destroyed"
+      // throw instead of crashing the main process from this async callback.
       if (navigatePath && !event.sender.isDestroyed()) {
-        event.sender.send("omnigent:notification-activated", navigatePath);
+        try {
+          event.sender.send("omnigent:notification-activated", navigatePath);
+        } catch {
+          // Sender went away after the notification was posted; nothing to do.
+        }
       }
     });
     notification.show();
