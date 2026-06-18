@@ -649,9 +649,7 @@ class CursorExecutor(Executor):
                     if isinstance(raw, dict) and raw:
                         turn_usage = _normalize_cursor_usage(raw, model)
 
-            run = await state.agent.send(
-                prompt, options=_SendOptions(on_delta=_capture_delta)
-            )
+            run = await state.agent.send(prompt, options=_SendOptions(on_delta=_capture_delta))
             async for stream_event in run.events():
                 if stream_event.sdk_message is not None:
                     for event in _sdk_message_to_events(stream_event.sdk_message):
