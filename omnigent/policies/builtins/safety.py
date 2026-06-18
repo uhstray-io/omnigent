@@ -114,7 +114,10 @@ def ask_on_os_tools(event: PolicyEvent) -> PolicyResponse:
     if not isinstance(data, dict):
         return _ALLOW
     tool = data.get("name", "")
-    if tool in _SYS_OS_TOOLS or tool in _NATIVE_OS_TOOLS or tool in _CURSOR_NATIVE_OS_TOOLS or tool in _PI_NATIVE_OS_TOOLS:
+    _all_os_tools = (
+        _SYS_OS_TOOLS | _NATIVE_OS_TOOLS | _CURSOR_NATIVE_OS_TOOLS | _PI_NATIVE_OS_TOOLS
+    )
+    if tool in _all_os_tools:
         args = data.get("arguments", {})
         # Build a short preview of what the tool is doing.
         if tool in ("sys_os_shell", "Bash", "bash", "Shell"):

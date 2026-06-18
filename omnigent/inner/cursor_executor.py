@@ -407,7 +407,7 @@ def _write_cursor_hooks(cwd: str, hook_script_path: str, server_url: str, sessio
                     "timeout": 30,
                 }
             ]
-        }
+        },
     }
     hooks_file.write_text(json.dumps(config, indent=2))
     return hooks_file
