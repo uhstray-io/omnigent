@@ -3454,15 +3454,15 @@ def _upgrade_vcs_install(
     current_sha = info.commit_sha or ""
     cur_short = current_sha[:9] if current_sha else "unknown"
     remote_sha = _remote_git_head(info.vcs_url) if info.vcs_url else None
+    remote_short = remote_sha[:9] if remote_sha else ""
     known_behind = bool(remote_sha and current_sha and remote_sha != current_sha)
 
     if remote_sha and current_sha and remote_sha == current_sha:
         click.echo(f"omnigent is up to date (git {cur_short}, tracking {info.vcs_url}).")
         return
     if known_behind:
-        # mypy: known_behind implies remote_sha is truthy.
         click.echo(
-            f"A newer commit is available: {cur_short} → {remote_sha[:9]} "  # type: ignore[index]
+            f"A newer commit is available: {cur_short} → {remote_short} "
             f"(git install tracking {info.vcs_url})."
         )
     else:
@@ -3473,10 +3473,19 @@ def _upgrade_vcs_install(
 
     if check_only:
         # Exit non-zero only when we KNOW it's behind, so `--check` stays a
-        # reliable CI gate; an indeterminate remote is not a failure.
+        # reliable CI gate; an indeterminate remote is not a failure. SystemExit
+        # (not ctx.exit) for the same reason as the PyPI path — main() runs the
+        # group with standalone_mode=False, where ctx.exit's code is dropped.
         if known_behind:
             raise SystemExit(1)
         return
+
+    if pre:
+        # ``--pre`` only steers a PyPI resolve; a git install gets exactly the
+        # commit its ref points at, so say so rather than implying it had effect.
+        click.echo(
+            "Note: --pre has no effect on a git install; the tracked ref decides the commit."
+        )
 
     suggestion = _build_upgrade_suggestion(info, allow_prerelease=pre)
     if not suggestion.runnable:
@@ -3493,8 +3502,8 @@ def _upgrade_vcs_install(
             f"Upgrade command exited with status {code}; your previous install is intact."
         )
 
-    # Verify by commit, not exit code: a re-pull of a ref that hasn't moved
-    # (or a pinned ref) exits 0 without changing anything.
+    # Verify by commit, not exit code: a re-pull of a ref that hasn't moved (or
+    # a pinned ref, or a cached reinstall) exits 0 without changing anything.
     _, new_sha = _probe_installed_distribution()
     if new_sha and current_sha and new_sha != current_sha:
         click.echo(
@@ -3502,7 +3511,18 @@ def _upgrade_vcs_install(
             "server will start on the new version."
         )
         return
+    if known_behind and new_sha and new_sha == current_sha:
+        # We positively confirmed the ref had advanced, yet the re-pull left the
+        # install on the same commit — a silent no-op that would otherwise
+        # recreate the "still behind" loop. Fail loudly, mirroring the PyPI guard.
+        raise click.ClickException(
+            f"The re-pull ran but the install is still at {cur_short} (the ref is at "
+            f"{remote_short}). The ref may be pinned or the reinstall reused a cached "
+            f"commit; try `uv tool install --reinstall {info.vcs_url}`."
+        )
     if new_sha and current_sha and new_sha == current_sha:
+        # Remote was indeterminate, so we never claimed it was behind — a
+        # no-change re-pull is fine here.
         click.echo(
             f"Already on the latest commit of the tracked ref ({cur_short}); nothing changed."
         )

@@ -440,3 +440,24 @@ def test_upgrade_git_install_noop_does_not_claim_update(
     assert result.exit_code == 0, result.output
     assert "nothing changed" in result.output
     assert "✓ Updated" not in result.output
+
+
+def test_upgrade_git_confirmed_behind_but_repull_noop_fails(
+    monkeypatch: pytest.MonkeyPatch, _wheel_install: None
+) -> None:
+    """Regression: known-behind git install whose re-pull doesn't move the commit
+    must FAIL, not silently exit 0 (else it recreates the loop on the git path)."""
+    monkeypatch.setattr("omnigent.update_check._read_installed_wheel_info", _git_install_info)
+    # Remote HEAD differs from the installed commit ("a"*40) → positively behind.
+    monkeypatch.setattr("omnigent.update_check._remote_git_head", lambda _url: "b" * 40)
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 0)
+    # …but the re-pull left the install on the SAME commit (pinned ref / cached).
+    monkeypatch.setattr(
+        "omnigent.update_check._probe_installed_distribution", lambda: ("0.1.0", "a" * 40)
+    )
+
+    result = CliRunner().invoke(cli, ["upgrade"])
+
+    assert result.exit_code != 0, result.output
+    assert "still at aaaaaaaaa" in result.output
+    assert "✓ Updated" not in result.output

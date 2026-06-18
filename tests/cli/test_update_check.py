@@ -1996,6 +1996,24 @@ def test_split_vcs_url_strips_prefix_and_separates_revision() -> None:
     )
 
 
+def test_split_vcs_url_strips_pip_fragment() -> None:
+    """A ``#egg=`` / ``#subdirectory=`` fragment is dropped from URL and ref.
+
+    Left on, the fragment would ride along into ``git ls-remote`` and match no
+    ref, silently making the commit comparison indeterminate.
+    """
+    from omnigent.update_check import _split_vcs_url
+
+    assert _split_vcs_url("git+https://github.com/o/omnigent.git#egg=omnigent") == (
+        "https://github.com/o/omnigent.git",
+        None,
+    )
+    assert _split_vcs_url("git+https://github.com/o/omnigent.git@main#subdirectory=pkg") == (
+        "https://github.com/o/omnigent.git",
+        "main",
+    )
+
+
 def test_split_vcs_url_ssh_userinfo_is_not_a_revision() -> None:
     """An ``@`` in SSH userinfo (``git@host``) must not be read as a revision."""
     from omnigent.update_check import _split_vcs_url

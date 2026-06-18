@@ -1416,6 +1416,8 @@ def _probe_installed_distribution() -> tuple[str | None, str | None]:
             [sys.executable, "-c", probe],
             capture_output=True,
             text=True,
+            # A metadata lookup is sub-second; the git timeout is reused only as
+            # a generous upper bound so a wedged interpreter can't hang the CLI.
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
@@ -1442,6 +1444,10 @@ def _split_vcs_url(vcs_url: str) -> tuple[str, str | None]:
         ``("https://host/org/repo.git", "main")``.
     """
     url = vcs_url[4:] if vcs_url.startswith("git+") else vcs_url
+    # Drop a PEP 508 / pip URL fragment (``#egg=...`` / ``#subdirectory=...``).
+    # It is never part of the remote URL or the ref, and leaving it on would
+    # make ``git ls-remote`` query a nonexistent ref and silently return None.
+    url = url.split("#", 1)[0]
     at = url.rfind("@")
     if at > url.rfind("/"):  # '@' past the final path segment → revision suffix
         return url[:at], (url[at + 1 :] or None)
