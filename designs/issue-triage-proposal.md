@@ -62,7 +62,7 @@ Triggered on every new issue. The bot classifies, deduplicates, resolves what it
 | **`needs-info`**, reporter responds | Bot removes `needs-info`, re-adds `needs-triage`, bot re-triages | No |
 | **`needs-info`**, no response 14d | Marked `stale` → closed after 7 more days | No |
 | **`good-first-issue`** | Contributor claims via comment, starts working | No (until PR review) |
-| **Stale** (30d no activity) | Marked `stale` → closed after 14 more days | No |
+| **Stale** (14d no activity) | Marked `stale` → closed after 14 more days | No |
 | **`P0-critical` or `P1-high`** | Stays open, exempt from stale bot | **Yes - escalated** |
 | **`P2-medium` bug** with repro | Stays open for contributor pickup or maintainer prioritization | **Maybe** |
 | **Bot uncertain** | Leaves `needs-triage`, doesn't apply priority | **Yes - escalated** |
@@ -127,7 +127,7 @@ Duplicates get a 3-day grace period. Reporter can react 👎 to prevent closure.
 
 ### Decision: Stale lifecycle with exemptions
 
-30 days → stale, 14 more days → close. P0/P1, GFI, and help-wanted issues are exempt.
+14 days → stale, 14 more days → close. P0/P1, GFI, and help-wanted issues are exempt.
 
 **Why:** Prevents issue rot without losing important work. The exemption list ensures high-priority bugs and contributor-ready issues stay open. Anyone can reopen a stale-closed issue.
 
