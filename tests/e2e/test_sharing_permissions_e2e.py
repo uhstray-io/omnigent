@@ -113,9 +113,7 @@ def owner_session(
         model=model,
         profile="",
         prompt="You are a terse assistant. Follow instructions exactly.",
-        mock_llm_base_url=(
-            f"{mock_llm_server_url}/v1" if mock_llm_server_url else None
-        ),
+        mock_llm_base_url=(f"{mock_llm_server_url}/v1" if mock_llm_server_url else None),
     )
     session_id = create_runner_bound_session(
         owner, agent_name=agent_name, runner_id=live_runner_id
