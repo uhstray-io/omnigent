@@ -12,9 +12,19 @@ Covers ``sys_session_send`` (singular) dispatch:
   dispatches one sub-agent and checks the unified
   async_work_complete drain handles the sub_agent kind.
 
-All three tests use mock-LLM keyed queues. The sub-agent-test bundle
-is uploaded (declaring sub-agent specs the runner needs) and mock
-responses control each agent's behaviour deterministically.
+All three tests use mock-LLM keyed queues. The parent agent is
+registered via ``register_inline_agent`` with ``mock_llm_base_url``
+so the parent harness always calls the mock server. The inline
+sub-agent specs (researcher, summarizer) also carry ``auth.base_url``
+pointing at the mock server — now propagated through
+``_agent_tool_to_sub_spec`` via the ``raw_executor`` parameter so
+child sub-agents never reach the real LLM API even under CI's
+``--llm-api-key`` / ``--profile`` mode.
+
+Separate mock-queue keys per agent (parent vs researcher vs
+summarizer) prevent the queues from interleaving: each harness
+subprocess identifies itself by the model name baked into its
+spawn-env, and the mock server routes by that model.
 
 Excluded from default ``pytest`` runs via ``--ignore=tests/e2e``.
 Invoke with::
@@ -26,7 +36,7 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
+import uuid
 
 import httpx
 import pytest
@@ -35,40 +45,115 @@ from tests.e2e.conftest import (
     configure_mock_llm,
     create_runner_bound_session,
     poll_session_until_terminal,
+    register_inline_agent,
     reset_mock_llm,
     send_user_message_to_session,
-    upload_agent,
 )
 from tests.e2e.helpers import POLL_INTERVAL_S
-
-_FIXTURES_DIR = Path(__file__).resolve().parents[1] / "_fixtures" / "agents"
-_SUB_AGENT_FIXTURE = _FIXTURES_DIR / "sub-agent-test"
 
 # Each test is 3+ serial gateway turns (dispatch + sub-agent + auto-wake),
 # so 600s absorbs potential backoff.
 pytestmark = pytest.mark.timeout(600, method="signal")
 
+# Stable marker strings checked in the session snapshot.
+_RESEARCHER_MARKER = "RESEARCHER_MARKER_2025"
+_SUMMARIZER_MARKER = "SUMMARIZER_MARKER_2025"
+
+
+# ─── Fixture ─────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="session")
 def sub_agent_test_agent(
     http_client: httpx.Client,
-    databricks_workspace_host: str | None,
-    databricks_profile_or_none: str | None,
-) -> str:
-    """Upload the sub-agent-test fixture (parent + 2 sub-agents).
+    mock_llm_server_url: str,
+) -> tuple[str, str, str, str]:
+    """Register parent + researcher + summarizer with mock LLM URLs.
+
+    Returns ``(parent_name, parent_model, researcher_model,
+    summarizer_model)``. Each agent gets a unique model name so the
+    mock server routes LLM calls to separate keyed queues — parent
+    calls never interleave with child calls.
+
+    ``mock_llm_base_url`` bakes the mock server URL directly into each
+    executor's ``auth.base_url``. For the parent this flows through
+    ``register_inline_agent``'s ``executor["auth"]`` dict directly.
+    For inline sub-agent tools, it flows through the ``auth:`` block
+    in ``extra_config["tools"][name]["executor"]``, which
+    ``_agent_tool_to_sub_spec`` now propagates via ``raw_executor`` to
+    ``_translate_executor_from_def`` (the product fix on this branch).
+    Without that fix, child sub-agents would fall back to the ambient
+    ``OPENAI_BASE_URL``, causing them to hit the real API in CI.
 
     :param http_client: HTTP client pointed at the live server.
-    :param databricks_workspace_host: Workspace host URL when
-        ``--profile`` is set, else ``None``.
-    :param databricks_profile_or_none: Active ``--profile`` value.
-    :returns: Agent name ``"sub-agent-test"``.
+    :param mock_llm_server_url: Mock LLM server base URL.
+    :returns: Tuple ``(parent_name, parent_model, researcher_model,
+        summarizer_model)``.
     """
-    return upload_agent(
+    uid = uuid.uuid4().hex[:6]
+    parent_model = f"mock-p3-parent-{uid}"
+    researcher_model = f"mock-p3-researcher-{uid}"
+    summarizer_model = f"mock-p3-summarizer-{uid}"
+
+    # openai-agents harness expects /v1 in the base URL (the OpenAI SDK
+    # appends /responses to the base URL, so the base must include /v1).
+    mock_base = f"{mock_llm_server_url}/v1"
+
+    parent_name = register_inline_agent(
         http_client,
-        _SUB_AGENT_FIXTURE,
-        rewrite_model_for_databricks=databricks_workspace_host is not None,
-        databricks_profile=databricks_profile_or_none,
+        name=f"sub-agent-test-{uid}",
+        harness="openai-agents",
+        model=parent_model,
+        profile="",
+        prompt=(
+            "You are the sub-agent E2E test fixture parent. Dispatch the "
+            "requested sub-agent(s) via sys_session_send and quote the "
+            "literal marker strings each returns.\n\n"
+            "Available sub-agents: researcher, summarizer.\n"
+            "To dispatch both in parallel, emit two sys_session_send calls "
+            "in the same response."
+        ),
+        mock_llm_base_url=mock_base,
+        extra_config={
+            "tools": {
+                "researcher": {
+                    "type": "agent",
+                    "description": "Test-fixture researcher. Returns RESEARCHER_MARKER_2025.",
+                    "executor": {
+                        "harness": "openai-agents",
+                        "model": researcher_model,
+                        "auth": {
+                            "type": "api_key",
+                            "api_key": "mock-key",
+                            "base_url": mock_base,
+                        },
+                    },
+                    "prompt": (
+                        "You are the test-fixture researcher. Include "
+                        "RESEARCHER_MARKER_2025 verbatim in your response."
+                    ),
+                },
+                "summarizer": {
+                    "type": "agent",
+                    "description": "Test-fixture summarizer. Returns SUMMARIZER_MARKER_2025.",
+                    "executor": {
+                        "harness": "openai-agents",
+                        "model": summarizer_model,
+                        "auth": {
+                            "type": "api_key",
+                            "api_key": "mock-key",
+                            "base_url": mock_base,
+                        },
+                    },
+                    "prompt": (
+                        "You are the test-fixture summarizer. Include "
+                        "SUMMARIZER_MARKER_2025 verbatim in your response."
+                    ),
+                },
+            },
+        },
     )
+    return parent_name, parent_model, researcher_model, summarizer_model
 
 
 # ─── Mock helpers ───────────────────────────────────────────
@@ -151,7 +236,7 @@ def _run_turn(
 
 def test_single_sub_agent_e2e(
     http_client: httpx.Client,
-    sub_agent_test_agent: str,
+    sub_agent_test_agent: tuple[str, str, str, str],
     live_runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
@@ -163,9 +248,8 @@ def test_single_sub_agent_e2e(
     3. Child (researcher) LLM -> text with RESEARCHER_MARKER_2025
     4. Parent auto-wake continuation -> text quoting the marker
     """
+    parent_name, parent_model, researcher_model, _ = sub_agent_test_agent
     reset_mock_llm(mock_llm_server_url)
-    # All agents share the "default" queue (model gpt-5.4 maps to default).
-    # Queue order: parent dispatch, parent ack, child response, parent auto-wake.
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -175,16 +259,20 @@ def test_single_sub_agent_e2e(
                 ],
             },
             {"text": "Dispatched researcher, waiting for result."},
-            {"text": "Research complete. RESEARCHER_MARKER_2025"},
-            {"text": "The researcher returned: RESEARCHER_MARKER_2025"},
+            {"text": f"The researcher returned: {_RESEARCHER_MARKER}"},
         ],
-        key="default",
+        key=parent_model,
+    )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": f"Research complete. {_RESEARCHER_MARKER}"}],
+        key=researcher_model,
     )
 
     body, session_id = _run_turn(
         http_client,
         runner_id=live_runner_id,
-        agent_name=sub_agent_test_agent,
+        agent_name=parent_name,
         user_text="Dispatch the researcher sub-agent.",
     )
     assert body["status"] == "completed", (
@@ -193,12 +281,12 @@ def test_single_sub_agent_e2e(
     )
 
     # The marker surfaces via auto-wake (async).
-    _wait_for_markers(http_client, session_id, "RESEARCHER_MARKER_2025")
+    _wait_for_markers(http_client, session_id, _RESEARCHER_MARKER)
 
 
 def test_parallel_sub_agents_e2e(
     http_client: httpx.Client,
-    sub_agent_test_agent: str,
+    sub_agent_test_agent: tuple[str, str, str, str],
     live_runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
@@ -211,9 +299,8 @@ def test_parallel_sub_agents_e2e(
     4. Child summarizer -> text with SUMMARIZER_MARKER_2025
     5. Parent auto-wake -> text quoting both markers
     """
+    parent_name, parent_model, researcher_model, summarizer_model = sub_agent_test_agent
     reset_mock_llm(mock_llm_server_url)
-    # All agents share the "default" queue. Queue order:
-    # parent dispatch, parent ack, two children, parent auto-wake.
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -228,17 +315,25 @@ def test_parallel_sub_agents_e2e(
                 ],
             },
             {"text": "Dispatched both sub-agents, waiting."},
-            {"text": "Research done. RESEARCHER_MARKER_2025"},
-            {"text": "Summary done. SUMMARIZER_MARKER_2025"},
-            {"text": ("Results: RESEARCHER_MARKER_2025 and SUMMARIZER_MARKER_2025")},
+            {"text": f"Results: {_RESEARCHER_MARKER} and {_SUMMARIZER_MARKER}"},
         ],
-        key="default",
+        key=parent_model,
+    )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": f"Research done. {_RESEARCHER_MARKER}"}],
+        key=researcher_model,
+    )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": f"Summary done. {_SUMMARIZER_MARKER}"}],
+        key=summarizer_model,
     )
 
     body, session_id = _run_turn(
         http_client,
         runner_id=live_runner_id,
-        agent_name=sub_agent_test_agent,
+        agent_name=parent_name,
         user_text="Dispatch BOTH the researcher AND the summarizer in parallel.",
     )
     assert body["status"] == "completed", (
@@ -249,14 +344,14 @@ def test_parallel_sub_agents_e2e(
     _wait_for_markers(
         http_client,
         session_id,
-        "RESEARCHER_MARKER_2025",
-        "SUMMARIZER_MARKER_2025",
+        _RESEARCHER_MARKER,
+        _SUMMARIZER_MARKER,
     )
 
 
 def test_mixed_sub_agent_and_async_tool_e2e(
     http_client: httpx.Client,
-    sub_agent_test_agent: str,
+    sub_agent_test_agent: tuple[str, str, str, str],
     live_runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
@@ -265,6 +360,7 @@ def test_mixed_sub_agent_and_async_tool_e2e(
     Same as single sub-agent dispatch -- the E2E layer proves the
     real-LLM flow doesn't regress on the kind discriminator path.
     """
+    parent_name, parent_model, researcher_model, _ = sub_agent_test_agent
     reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
@@ -275,18 +371,22 @@ def test_mixed_sub_agent_and_async_tool_e2e(
                 ],
             },
             {"text": "Dispatched researcher, waiting."},
-            {"text": "Done. RESEARCHER_MARKER_2025"},
-            {"text": "Researcher returned: RESEARCHER_MARKER_2025"},
+            {"text": f"Researcher returned: {_RESEARCHER_MARKER}"},
         ],
-        key="default",
+        key=parent_model,
+    )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": f"Done. {_RESEARCHER_MARKER}"}],
+        key=researcher_model,
     )
 
     body, session_id = _run_turn(
         http_client,
         runner_id=live_runner_id,
-        agent_name=sub_agent_test_agent,
+        agent_name=parent_name,
         user_text="Dispatch the researcher sub-agent.",
     )
     assert body["status"] == "completed"
 
-    _wait_for_markers(http_client, session_id, "RESEARCHER_MARKER_2025")
+    _wait_for_markers(http_client, session_id, _RESEARCHER_MARKER)
