@@ -548,6 +548,15 @@ class _ResponseQueue:
         self.responses: list[QueuedResponse] = []
         self.index: int = 0
         self.fallback: QueuedResponse | None = None
+        # Optional content-routing token. When set, a request is served
+        # from this queue if the token appears in the request's
+        # role="user" input text — regardless of the request's ``model``.
+        # Lets each test claim its own queue by the (unique) message it
+        # sends, so a stray/late request from another test (which carries
+        # a different user message) can't draw from this test's queue —
+        # the #523 cross-test contamination, fixed without per-test
+        # servers. ``None`` preserves the default model/"default" routing.
+        self.match: str | None = None
 
     def next(self) -> QueuedResponse:
         """Consume the next response, or return the fallback / default."""
@@ -560,9 +569,10 @@ class _ResponseQueue:
         return QueuedResponse()
 
     def reset(self) -> None:
-        """Clear the regular queue; the fallback is preserved."""
+        """Clear the regular queue + content-routing token; fallback is preserved."""
         self.responses.clear()
         self.index = 0
+        self.match = None
 
 
 class MockState:
@@ -603,6 +613,53 @@ class MockState:
         # requests to unknown models share the same instance.
         self.queues[_DEFAULT_KEY] = _ResponseQueue()
         return self.queues[_DEFAULT_KEY]
+
+    @staticmethod
+    def _user_input_text(parsed: object) -> str:
+        """Concatenate the text of all ``role="user"`` items in the request input.
+
+        Scoped to user-role content deliberately — NOT the system prompt
+        (``instructions``) or tool outputs — so a content-routing token
+        only ever matches what the test itself typed, never incidental
+        words in a shared system prompt.
+
+        :param parsed: The parsed request body.
+        :returns: Space-joined user message text (``""`` if none).
+        """
+        if not isinstance(parsed, dict):
+            return ""
+        parts: list[str] = []
+        for item in parsed.get("input") or []:
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        parts.append(str(block.get("text", "")))
+        return " ".join(parts)
+
+    def resolve_queue_for_request(self, parsed: object) -> _ResponseQueue:
+        """Pick the queue for a request: content-routed queues first, then model/default.
+
+        A queue with a ``match`` token wins if that token appears in the
+        request's user input — this is how a test claims its own queue by
+        the unique message it sends. Otherwise falls back to the existing
+        ``model`` / ``"default"`` routing, so tests that don't opt in are
+        unaffected.
+
+        :param parsed: The parsed request body.
+        :returns: The selected response queue.
+        """
+        user_text = self._user_input_text(parsed)
+        if user_text:
+            for queue in self.queues.values():
+                if queue.match and queue.match in user_text:
+                    return queue
+        model = parsed.get("model") if isinstance(parsed, dict) else None
+        return self.resolve_queue(model)
 
     def reset(self) -> None:
         """Clear all state (queues, captured requests, gates).
@@ -657,7 +714,7 @@ async def create_response(
         _state.request_count += 1
         _state.captured_requests.append(parsed)
         model = parsed.get("model") if isinstance(parsed, dict) else None
-        queue = _state.resolve_queue(model)
+        queue = _state.resolve_queue_for_request(parsed)
         qr = queue.next()
 
     # Error response
@@ -725,7 +782,7 @@ async def create_message(
         _state.request_count += 1
         _state.captured_requests.append(parsed)
         model = parsed.get("model") if isinstance(parsed, dict) else None
-        queue = _state.resolve_queue(model)
+        queue = _state.resolve_queue_for_request(parsed)
         qr = queue.next()
 
     if qr.error is not None:
@@ -775,7 +832,7 @@ async def create_chat_completion(
         _state.request_count += 1
         _state.captured_requests.append(parsed)
         model = parsed.get("model") if isinstance(parsed, dict) else None
-        queue = _state.resolve_queue(model)
+        queue = _state.resolve_queue_for_request(parsed)
         qr = queue.next()
 
     if qr.error is not None:
@@ -870,17 +927,27 @@ async def configure(request: Request) -> dict[str, object]:
 
         {
             "key": "mock-model",          // optional, default "default"
+            "match": "mangosteen-tr",     // optional content-routing token
             "responses": [{"text": "..."}, ...]
         }
+
+    When ``match`` is set, a request is served from this queue if the
+    token appears in the request's ``role="user"`` input text, regardless
+    of the request's ``model`` — so a test can claim its own queue by the
+    unique message it sends (per-test isolation against cross-test
+    contamination). Omitting ``match`` keeps the default model/"default"
+    routing.
 
     Multiple calls with different keys accumulate queues; use
     ``POST /mock/reset`` to clear all keys.
     """
     body = await request.json()
     key = body.get("key", _DEFAULT_KEY)
+    match = body.get("match")
     async with _state._lock:
         queue = _state.get_queue(key)
         queue.reset()
+        queue.match = match
         for entry in body.get("responses", []):
             queue.responses.append(
                 QueuedResponse(
