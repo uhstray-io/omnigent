@@ -1256,6 +1256,7 @@ export function NewChatLandingScreen() {
     </button>
   );
 
+  // something
   return (
     // pb-12 lifts the content slightly above the geometric center, where
     // the hero reads better optically.
