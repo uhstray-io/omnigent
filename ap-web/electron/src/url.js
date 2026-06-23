@@ -106,9 +106,11 @@
    * appended.
    *
    * NOTE: the Python CLI records the UI mount as ``/omnigent`` in
-   * ``omnigent/conversation_browser.py`` (WORKSPACE_UI_PATH); the value here is
-   * the path that actually resolves on the live workspace. The two should be
-   * reconciled — see also that file's WORKSPACE_API_PATH.
+   * ``omnigent/conversation_browser.py`` (WORKSPACE_UI_PATH), whereas the
+   * desktop deliberately keeps ``/ml/omnigents`` for now — that is the path the
+   * live workspace serves the embedded SPA on. The two are intentionally
+   * divergent pending reconciliation; do not "fix" this to ``/omnigent``
+   * without verifying what the workspace actually serves to the desktop shell.
    */
   const WORKSPACE_UI_PATH = "/ml/omnigents";
 
