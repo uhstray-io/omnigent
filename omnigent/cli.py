@@ -10241,7 +10241,7 @@ def _remember_default_server(server: str) -> None:
         ``"https://example.databricks.com/api/2.0/omnigent"``.
     """
     _save_global_config({"server": server})
-    click.echo(f"Set {server} as your default server (a bare `omnigent` now targets it).")
+    click.echo(f"Set {server} as your default server.")
 
 
 @cli.command("login")
