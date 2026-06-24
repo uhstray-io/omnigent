@@ -117,6 +117,13 @@ _HARNESS_MODULES: dict[str, str] = {
     # omnigent/inner/hermes_executor.py. The ``hermes`` binary must be
     # on PATH (or set by HARNESS_HERMES_PATH).
     "hermes": "omnigent.inner.hermes_harness",
+    # Gemini CLI harness wrap. Drives Google's ``gemini`` CLI as a
+    # subprocess with an MCP stdio bridge for Omnigent tool dispatch.
+    # See omnigent/inner/gemini_harness.py and
+    # omnigent/inner/gemini_executor.py. The ``gemini`` binary must be
+    # on PATH (or set by HARNESS_GEMINI_PATH).
+    "gemini": "omnigent.inner.gemini_harness",
+    "gemini-cli": "omnigent.inner.gemini_harness",
 }
 
 __all__ = ["_HARNESS_MODULES"]

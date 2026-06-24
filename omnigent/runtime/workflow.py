@@ -1294,6 +1294,30 @@ def _build_pi_spawn_env(
     return env
 
 
+def _build_gemini_spawn_env(
+    spec: AgentSpec,
+    *,
+    cwd: Path | None = None,
+) -> dict[str, str]:
+    """Build the env-var dict the Gemini harness wrap reads.
+
+    Maps spec fields → ``HARNESS_GEMINI_*`` env vars defined in
+    :mod:`omnigent.inner.gemini_executor`. Mirrors the other
+    ``_build_*_spawn_env`` helpers.
+
+    :param spec: The agent spec.
+    :param cwd: Runtime working directory forwarded as ``HARNESS_GEMINI_CWD``.
+    :returns: Env dict (may be empty).
+    """
+    env: dict[str, str] = {}
+    model = _resolve_spec_model(spec)
+    if model is not None:
+        env["HARNESS_GEMINI_MODEL"] = model
+    if cwd is not None:
+        env["HARNESS_GEMINI_CWD"] = str(cwd)
+    return env
+
+
 def _build_qwen_spawn_env(
     spec: AgentSpec,
     *,

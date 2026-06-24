@@ -87,6 +87,7 @@ OMNIGENT_HARNESSES = frozenset(
         "copilot",
         "cursor",
         "cursor-native",
+        "gemini",
         "goose",
         "goose-native",
         "hermes",
@@ -111,6 +112,7 @@ OMNIGENT_HARNESS_ALIASES = frozenset(
         "qwen-code",
         "opencode",
         "native-opencode",
+        "gemini-cli",
         "github-copilot",
     }
 )
