@@ -105,13 +105,21 @@ def _extract_last_user_message(messages: list[Message]) -> str:
     return ""
 
 
+def _get_conversation_id() -> str:
+    """Read --conversation-id from argv, same pattern as hermes_executor.py."""
+    argv = sys.argv
+    for i, arg in enumerate(argv):
+        if arg == "--conversation-id" and i + 1 < len(argv):
+            return argv[i + 1]
+    return os.environ.get("OMNIGENT_SESSION_ID", "")
+
+
 def _build_gemini_settings(
     workspace: str,
     tools: list[ToolSpec],
     *,
     server_url: str,
     session_id: str,
-    tool_token: str,
 ) -> None:
     """Write (or merge into) ``{workspace}/.gemini/settings.json``.
 
@@ -125,7 +133,6 @@ def _build_gemini_settings(
         mcpServers entry.
     :param server_url: Omnigent HTTP server URL.
     :param session_id: Omnigent conversation/session ID.
-    :param tool_token: Bearer token for Omnigent auth; may be empty.
     """
     gemini_dir = Path(workspace) / ".gemini"
     settings_path = gemini_dir / "settings.json"
@@ -141,17 +148,16 @@ def _build_gemini_settings(
     if tools:
         mcp_env: dict[str, str] = {
             "OMNIGENT_TOOLS_JSON": json.dumps(tools, separators=(",", ":")),
-            "OMNIGENT_SERVER_URL": server_url,
+            "RUNNER_SERVER_URL": server_url,
             "OMNIGENT_SESSION_ID": session_id,
         }
-        if tool_token:
-            mcp_env["OMNIGENT_TOOL_TOKEN"] = tool_token
         settings["mcpServers"] = {
             "omnigent": {
                 "command": sys.executable,
                 "args": ["-m", "omnigent.inner.gemini_mcp_server"],
                 "env": mcp_env,
                 "timeout": 30000,
+                "trust": True,
             }
         }
 
@@ -163,6 +169,7 @@ class _GeminiSessionState:
     """Per-conversation state for a GeminiExecutor session."""
 
     gemini_session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    first_turn: bool = True
 
 
 class GeminiExecutor(Executor):
@@ -197,6 +204,7 @@ class GeminiExecutor(Executor):
         self._model = model
         self._os_env = os_env
         self._session_states: dict[str, _GeminiSessionState] = {}
+        self._conv_id = _get_conversation_id()
 
     def handles_tools_internally(self) -> bool:
         """Gemini handles tool calls via its own MCP loop."""
@@ -209,7 +217,7 @@ class GeminiExecutor(Executor):
         self,
         messages: list[Message],
         tools: list[ToolSpec],
-        system_prompt: str,  # noqa: ARG002 — Gemini handles its own system prompt
+        system_prompt: str,
         config: ExecutorConfig | None = None,
     ) -> AsyncIterator[ExecutorEvent]:
         """Run one agent turn by spawning ``gemini`` as a subprocess.
@@ -232,6 +240,10 @@ class GeminiExecutor(Executor):
             yield TurnComplete(response=None)
             return
 
+        if system_prompt and system_prompt.strip():
+            prompt = f"{system_prompt.strip()}\n\n{prompt}"
+            # ponytail: system prompt prepended as text; GEMINI.md injection is the upgrade path
+
         model = (config.model if config else None) or self._model
 
         # Write the .gemini/settings.json MCP bridge config when we have a
@@ -239,31 +251,25 @@ class GeminiExecutor(Executor):
         workspace = self._cwd
         if workspace:
             server_url = os.environ.get("RUNNER_SERVER_URL", "").rstrip("/")
-            omnigent_sid = os.environ.get("OMNIGENT_SESSION_ID", "")
-            # Fall back to the conversation/session id from the messages
-            if not omnigent_sid:
-                omnigent_sid = key if key != "__default__" else ""
-            tool_token = os.environ.get("OMNIGENT_TOOL_TOKEN", "")
             try:
                 _build_gemini_settings(
                     workspace,
                     tools,
                     server_url=server_url,
-                    session_id=omnigent_sid,
-                    tool_token=tool_token,
+                    session_id=self._conv_id,
                 )
             except OSError as exc:
                 _logger.warning("GeminiExecutor: could not write .gemini/settings.json: %s", exc)
 
-        # Build the subprocess argv.
-        # ponytail: --session-id for multi-turn persistence; verify flag name vs actual Gemini CLI
+        # ponytail: --session-id starts fresh; --resume reloads history (Gemini CLI convention)
+        session_flag = "--session-id" if state.first_turn else "--resume"
         args = [
             self._gemini_path,
             "-p",
             prompt,
             "-o",
             "stream-json",
-            "--session-id",
+            session_flag,
             state.gemini_session_id,
         ]
         if model:
@@ -328,6 +334,9 @@ class GeminiExecutor(Executor):
                     etype = event.get("type", "")
 
                     if etype in ("content", "message"):
+                        # Skip user-role echoes; only yield assistant output
+                        if event.get("role") not in (None, "assistant", "model"):
+                            continue
                         text = event.get("text") or event.get("content") or ""
                         if isinstance(text, str) and text:
                             accumulated_text.append(text)
@@ -339,8 +348,8 @@ class GeminiExecutor(Executor):
                             result_text = json.dumps(result_text)
                         # Prefer the accumulated streaming text when available
                         final = "".join(accumulated_text) or result_text or None
-                        usage = _extract_usage(event)
-                        yield TurnComplete(response=final, usage=usage)
+                        state.first_turn = False  # must set before yield
+                        yield TurnComplete(response=final, usage=_extract_usage(event))
                         yielded_complete = True
 
                     elif etype == "error":
@@ -372,6 +381,7 @@ class GeminiExecutor(Executor):
                 )
             else:
                 final = "".join(accumulated_text) or None
+                state.first_turn = False
                 yield TurnComplete(response=final)
 
     async def close_session(self, session_key: str) -> None:

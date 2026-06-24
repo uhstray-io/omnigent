@@ -31,6 +31,8 @@ HARNESS_ALIASES: dict[str, str] = {
     # User-facing spelling for the GitHub Copilot SDK harness; the canonical id
     # is "copilot" (matches the registry / workflow type).
     "github-copilot": "copilot",
+    # Friendly alias for the Gemini CLI harness.
+    "gemini-cli": "gemini",
 }
 
 # Canonical native-CLI harness spellings. These harnesses type messages into

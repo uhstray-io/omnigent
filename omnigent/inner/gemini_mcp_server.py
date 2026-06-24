@@ -6,11 +6,9 @@ Reads these env vars at startup:
 
 - ``OMNIGENT_TOOLS_JSON``: JSON list of tool specs
   ``[{name, description, inputSchema}]`` in MCP tool format.
-- ``OMNIGENT_SERVER_URL``: Omnigent HTTP tool dispatch base URL,
+- ``RUNNER_SERVER_URL``: Omnigent HTTP tool dispatch base URL,
   e.g. ``"http://127.0.0.1:6767"``.
 - ``OMNIGENT_SESSION_ID``: Omnigent conversation/session ID.
-- ``OMNIGENT_TOOL_TOKEN``: Bearer token for the ``Authorization`` header.
-  When unset, no auth header is sent.
 
 MCP protocol implemented (minimal subset for tool calling):
 
@@ -40,9 +38,8 @@ def _dispatch_tool(tool_name: str, arguments: dict[str, Any]) -> str:  # type: i
     :param arguments: Tool arguments as a JSON-serialisable dict.
     :returns: A string to embed in the MCP ``tools/call`` content block.
     """
-    server_url = os.environ.get("OMNIGENT_SERVER_URL", "").rstrip("/")
+    server_url = os.environ.get("RUNNER_SERVER_URL", "").rstrip("/")
     session_id = os.environ.get("OMNIGENT_SESSION_ID", "")
-    token = os.environ.get("OMNIGENT_TOOL_TOKEN", "")
 
     url = f"{server_url}/v1/sessions/{session_id}/mcp"
     payload = json.dumps(
@@ -55,9 +52,9 @@ def _dispatch_tool(tool_name: str, arguments: dict[str, Any]) -> str:  # type: i
         separators=(",", ":"),
     ).encode("utf-8")
 
+    # ponytail: MCP bridge returns tool results as text only; policy ASK/input_required
+    # flows are not bridged — add resultType handling here when needed
     headers: dict[str, str] = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
@@ -109,10 +106,22 @@ async def _handle(req: dict[str, Any]) -> dict[str, Any] | None:  # type: ignore
     if method == "tools/list":
         raw = os.environ.get("OMNIGENT_TOOLS_JSON", "[]")
         try:
-            tools = json.loads(raw)
+            omnigent_tools = json.loads(raw)
         except json.JSONDecodeError:
-            tools = []
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
+            omnigent_tools = []
+        mcp_tools = [
+            {
+                "name": t.get("name", ""),
+                "description": t.get("description", ""),
+                "inputSchema": (
+                    t.get("parameters")
+                    or t.get("inputSchema")
+                    or {"type": "object", "properties": {}}
+                ),
+            }
+            for t in omnigent_tools
+        ]
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": mcp_tools}}
 
     if method == "tools/call":
         params = req.get("params") or {}
