@@ -79,6 +79,10 @@ COPILOT_KEY = "copilot"
 # Omnigent-managed credentials). The ``hermes`` binary must be on PATH.
 HERMES_KEY = "hermes"
 
+# Gemini CLI harness. Authenticates via `gemini auth login` (Google account)
+# and ships via its own installer (curl). No npm package.
+GEMINI_KEY = "gemini"
+
 
 @dataclass(frozen=True)
 class HarnessInstallSpec:
@@ -181,6 +185,12 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         package=None,
         install_hint="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
     ),
+    GEMINI_KEY: HarnessInstallSpec(
+        "Gemini",
+        "gemini",
+        package=None,
+        install_hint="npm install -g @google/gemini-cli || pip install gemini-cli",
+    ),
 }
 
 
@@ -222,6 +232,9 @@ _HARNESS_NAME_TO_KEY: dict[str, str] = {
     "native-opencode": OPENCODE_KEY,
     # Hermes Agent (``harness: hermes``) wraps the ``hermes`` CLI.
     HERMES_KEY: HERMES_KEY,
+    # Gemini CLI harness wraps the ``gemini`` CLI.
+    GEMINI_KEY: GEMINI_KEY,
+    "gemini-cli": GEMINI_KEY,
 }
 
 

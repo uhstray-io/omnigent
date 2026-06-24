@@ -30,6 +30,7 @@ from omnigent.harness_aliases import HARNESS_ALIASES, canonicalize_harness
 from omnigent.onboarding.harness_install import (
     COPILOT_KEY,
     CURSOR_KEY,
+    GEMINI_KEY,
     GOOSE_KEY,
     HERMES_KEY,
     OPENCODE_KEY,
@@ -84,6 +85,12 @@ _GOOSE_NATIVE_HARNESSES: frozenset[str] = frozenset({"goose-native", "native-goo
 # and ``native-qwen`` → ``qwen-native``). Unlike claude/codex they have no
 # ``_HARNESS_FAMILY`` entry, so they must be gated explicitly or they fail open.
 _QWEN_HARNESSES: frozenset[str] = frozenset({QWEN_KEY, "qwen-code", "qwen-native", "native-qwen"})
+
+# CLI-wrapping Gemini harnesses. Both the bare ``gemini`` (our headless ACP
+# harness) and the ``gemini-cli`` alias wrap the ``gemini`` binary. Unlike
+# claude/codex they have no ``_HARNESS_FAMILY`` entry, so they must be gated
+# explicitly or they fail open like an unknown harness.
+_GEMINI_HARNESSES: frozenset[str] = frozenset({"gemini", "gemini-cli"})
 
 
 def _canonical_harness(harness: str) -> str:
@@ -193,11 +200,14 @@ def harness_is_configured(harness: str) -> bool:
         return copilot_github_token_configured() or any(
             os.environ.get(var) for var in COPILOT_TOKEN_ENV_VARS
         )
+    if canonical in _GEMINI_HARNESSES:
+        return harness_cli_installed(GEMINI_KEY)
     if (
         canonical not in _HARNESS_FAMILY
         and canonical not in _PI_HARNESSES
         and canonical not in _OPENCODE_HARNESSES
         and canonical not in _QWEN_HARNESSES
+        and canonical not in _GEMINI_HARNESSES
     ):
         # Unknown harness — the daemon has no install metadata for it, so
         # it can't assess readiness. Fail open (custom/newer harnesses,
@@ -231,4 +241,6 @@ def configured_harness_map() -> dict[str, bool]:
     spellings.add(GOOSE_KEY)  # headless Goose (``goose acp``) gates on the goose binary
     spellings.add(HERMES_KEY)  # Hermes Agent wraps the ``hermes`` CLI
     spellings.add(COPILOT_KEY)
+    spellings.update(_GEMINI_HARNESSES)
+    spellings.add(GEMINI_KEY)
     return {spelling: harness_is_configured(spelling) for spelling in spellings}
