@@ -170,6 +170,27 @@ def _get_conversation_id() -> str | None:
     return None
 
 
+def _load_user_hermes_config() -> dict:
+    """Load the user's ``~/.hermes/config.yaml`` if it exists.
+
+    Returns the parsed YAML dict, or ``{}`` when the file is missing
+    or malformed.  Only the provider/model keys are interesting — the
+    per-session ``config.yaml`` merges them with Omnigent's policy-hook
+    config so Hermes can authenticate with the user's configured
+    inference provider.
+    """
+    user_config = Path.home() / ".hermes" / "config.yaml"
+    if not user_config.is_file():
+        return {}
+    try:
+        import yaml  # noqa: PLC0415 — yaml is a Hermes dep, always available
+
+        return yaml.safe_load(user_config.read_text()) or {}
+    except Exception:
+        _logger.debug("Failed to load user Hermes config at %s", user_config, exc_info=True)
+        return {}
+
+
 def _populate_hermes_home(
     hermes_home: Path,
     hook_script_path: str,
@@ -181,6 +202,10 @@ def _populate_hermes_home(
     Creates a ``config.yaml`` that registers the Omnigent policy hook
     as a ``pre_tool_call`` shell hook, and writes a wrapper script
     that exports the server env vars before exec-ing the Python hook.
+
+    The user's ``~/.hermes/config.yaml`` model/provider settings are
+    merged into the per-session config so Hermes can authenticate with
+    the inference provider the user configured via ``hermes model``.
 
     This mirrors how Codex creates a per-session ``CODEX_HOME`` with
     its own ``config.toml`` — Hermes scopes all state (config, sessions,
@@ -203,21 +228,33 @@ def _populate_hermes_home(
     )
     wrapper.chmod(0o755)
 
-    # Write config.yaml with the pre_tool_call hook and auto-accept.
-    config = {
-        "hooks_auto_accept": True,
-        "hooks": {
-            "pre_tool_call": [
-                {
-                    "command": str(wrapper),
-                    "timeout": 60,
-                },
-            ],
-        },
+    # Start from the user's config so model/provider/auth settings carry over.
+    # Hermes scopes everything to HERMES_HOME, so without this merge it won't
+    # find the inference provider the user configured via ``hermes model``.
+    user_cfg = _load_user_hermes_config()
+    config: dict = {**user_cfg}
+
+    # Layer Omnigent's policy hook config on top.
+    config["hooks_auto_accept"] = True
+    config["hooks"] = {
+        **config.get("hooks", {}),
+        "pre_tool_call": [
+            {
+                "command": str(wrapper),
+                "timeout": 60,
+            },
+        ],
     }
+
     config_path = hermes_home / "config.yaml"
     # Use JSON for YAML-compatible output (JSON is valid YAML).
     config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    # Copy the user's .env file if present (carries API keys like
+    # OPENROUTER_API_KEY, OPENAI_API_KEY, etc.).
+    user_env = Path.home() / ".hermes" / ".env"
+    if user_env.is_file():
+        shutil.copy2(user_env, hermes_home / ".env")
 
     # Pre-populate the allowlist so Hermes never prompts for consent.
     allowlist_path = hermes_home / "shell-hooks-allowlist.json"
