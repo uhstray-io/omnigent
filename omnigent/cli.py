@@ -9523,6 +9523,53 @@ def _manage_hermes_harness() -> None:
                 status = "✗ hermes binary not found"
 
 
+def _manage_gemini_harness() -> None:
+    """Run the level-2 loop for Gemini CLI: ensure the CLI is installed.
+
+    Gemini owns its own auth via ``gemini auth login`` — Omnigent stores no
+    Gemini credential. A missing CLI gates the drill-in; when installed, the
+    drill-in confirms the binary is ready.
+
+    :returns: None.
+    """
+    from omnigent.onboarding.harness_install import (
+        GEMINI_KEY,
+        harness_cli_installed,
+        harness_install_spec,
+    )
+    from omnigent.onboarding.interactive import console, select
+
+    if not harness_cli_installed(GEMINI_KEY):
+        spec = harness_install_spec(GEMINI_KEY)
+        hint = (
+            spec.install_hint
+            if spec and spec.install_hint
+            else "npm install -g @google/gemini-cli"
+        )
+        console.print(
+            f"  Gemini CLI isn't installed. Install it with:\n    [bold]{hint}[/bold]\n"
+            "  then run [bold]gemini auth login[/bold] and re-open this menu."
+        )
+        return
+
+    status: str | None = None
+    while True:
+        rows: list[_HarnessMenuRow] = [
+            _HarnessMenuRow("← Back", action="back"),
+        ]
+        idx = select(
+            "Gemini CLI",
+            [r.label for r in rows],
+            clear_on_exit=True,
+            status=status or "[green]✓[/] Gemini CLI is installed",
+        )
+        if idx < 0:
+            return
+        action = rows[idx].action
+        if action == "back":
+            return
+
+
 def _prompt_install_copilot() -> str | None:
     """Offer to install the missing ``copilot`` extra; return a status line.
 
@@ -10241,6 +10288,7 @@ def _run_configure_harnesses_interactive() -> None:
         COPILOT_KEY,
         CURSOR_KEY,
         GOOSE_KEY,
+        GEMINI_KEY,
         HERMES_KEY,
         OPENCODE_KEY,
         QWEN_KEY,
@@ -10302,6 +10350,9 @@ def _run_configure_harnesses_interactive() -> None:
     # Sentinel marking the Hermes row — like Goose it owns its own auth via
     # ``hermes model`` and is installed via a curl installer.
     _HERMES = "\x00hermes"
+    # Sentinel marking the Gemini row — like Hermes it owns its own auth via
+    # ``gemini auth login`` and is installed via npm/pip.
+    _GEMINI = "\x00gemini"
     families = [ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE]
     while True:
         config = _load_global_config()
@@ -10543,6 +10594,27 @@ def _run_configure_harnesses_interactive() -> None:
         options.append(f"  {hermes_sub}")
         selectable.append(False)
         row_target.append(None)
+        # Gemini CLI (its own auth via ``gemini auth login``, installed via
+        # npm/pip — no Omnigent-managed credential).
+        gemini_installed = harness_cli_installed(GEMINI_KEY)
+        options.append(f"{'  ' if gemini_installed else '[red]✗[/] '}Gemini")
+        selectable.append(True)
+        row_target.append(_GEMINI)
+        if not gemini_installed:
+            from rich.markup import escape as _rich_escape
+
+            gemini_spec = harness_install_spec(GEMINI_KEY)
+            gemini_hint = _rich_escape(
+                gemini_spec.install_hint
+                if gemini_spec and gemini_spec.install_hint
+                else "npm install -g @google/gemini-cli"
+            )
+            gemini_sub = f"[dim]not installed — open to install ({gemini_hint})[/]"
+        else:
+            gemini_sub = "[green]✓[/] ready"
+        options.append(f"  {gemini_sub}")
+        selectable.append(False)
+        row_target.append(None)
         options.append("Quit")
         selectable.append(True)
         row_target.append(_QUIT)
@@ -10571,6 +10643,8 @@ def _run_configure_harnesses_interactive() -> None:
             _manage_goose_harness()
         elif target == _HERMES:
             _manage_hermes_harness()
+        elif target == _GEMINI:
+            _manage_gemini_harness()
         else:  # Quit row (or, defensively, a non-family row)
             return
 
