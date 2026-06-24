@@ -303,6 +303,7 @@ tools:
     - codex
     - pi
     - opencode
+    - gemini
 
 # Mechanism-layer enforcement — runner-side tool gate, no server change.
 guardrails:
