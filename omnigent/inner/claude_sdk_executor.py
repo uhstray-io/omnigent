@@ -2099,7 +2099,7 @@ class ClaudeSDKExecutor(Executor):
         observed_model: str | None = None
         system_diagnostics: list[str] = []
         terminal_error: str | None = None
-        compaction_occurred: bool = False
+
         # Track in-flight tool calls so we can emit ToolCallComplete
         # with the tool name and duration when results arrive.
         pending_tools: dict[str, tuple[str, float]] = {}  # id → (name, start_mono)
@@ -2470,7 +2470,6 @@ class ClaudeSDKExecutor(Executor):
                                 )
                                 break
                         elif getattr(system_msg, "hook_event_name", None) == "PreCompact":
-                            compaction_occurred = True
                             logger.info("Claude SDK compaction detected (PreCompact hook)")
                         else:
                             logger.info("Claude CLI system message: %s", data)
@@ -2527,19 +2526,6 @@ class ClaudeSDKExecutor(Executor):
                 return
 
         _notify_usage_from_dict(model=model, usage=turn_usage)
-
-        if compaction_occurred:
-            from omnigent.inner.executor import CompactionComplete
-
-            _compaction_tokens = 0
-            if turn_usage is not None:
-                _compaction_tokens = turn_usage.get("context_tokens", 0) or 0
-            yield CompactionComplete(
-                summary="[Claude Code compaction — context was automatically compacted]",
-                token_count=_compaction_tokens,
-                model=observed_model or model,
-            )
-
         yield TurnComplete(response=response_text, usage=turn_usage)
 
     @staticmethod

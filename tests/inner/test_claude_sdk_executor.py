@@ -3383,9 +3383,10 @@ class TestToolCallPolicyGate(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def test_precompact_hook_emits_compaction_complete() -> None:
-    """When a PreCompact HookEventMessage flows through the stream,
-    a CompactionComplete event is yielded before TurnComplete."""
+def test_precompact_hook_does_not_emit_compaction_complete() -> None:
+    """Claude SDK owns its own session persistence, so PreCompact hooks
+    are logged but do NOT emit CompactionComplete — the runner has no
+    useful compacted state to persist."""
     from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
     from omnigent.inner.executor import CompactionComplete
 
@@ -3431,13 +3432,11 @@ def test_precompact_hook_emits_compaction_complete() -> None:
 
             async def query(self, prompt, session_id="default"):
                 _FakeSDK.messages = [
-                    # PreCompact hook event
                     _HookEventMessage(
                         subtype="hook_started",
                         data={"hook_event": "PreCompact"},
                         hook_event_name="PreCompact",
                     ),
-                    # Result
                     _ResultMessage(session_id, "compacted result"),
                 ]
 
@@ -3461,14 +3460,9 @@ def test_precompact_hook_emits_compaction_complete() -> None:
             ]
 
         compaction_events = [e for e in events if isinstance(e, CompactionComplete)]
-        assert len(compaction_events) == 1, f"Expected 1 CompactionComplete, got {len(compaction_events)}"
-        assert "Claude Code compaction" in compaction_events[0].summary
-        turn_completes = [e for e in events if isinstance(e, TurnComplete)]
-        assert len(turn_completes) == 1
-        # CompactionComplete before TurnComplete
-        ci = events.index(compaction_events[0])
-        ti = events.index(turn_completes[0])
-        assert ci < ti
+        assert len(compaction_events) == 0, (
+            "claude-sdk should not emit CompactionComplete — it owns its own session persistence"
+        )
 
     _run(_t())
 
