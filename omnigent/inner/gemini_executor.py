@@ -272,6 +272,7 @@ class GeminiExecutor(Executor):
             prompt,
             "-o",
             "stream-json",
+            "--skip-trust",  # headless executor — trust check is interactive-only
             session_flag,
             state.gemini_session_id,
         ]
