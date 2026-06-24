@@ -172,7 +172,14 @@ class _SessionSnapshot(Protocol):
 # by iTerm2/Warp/tmux). Updating the hint without updating the
 # binding would desync the user's expectation from what actually
 # fires.
-WELCOME_HINTS = ["/help help", "Ctrl+O debug", "Ctrl+T show tools", "Esc cancel", "Ctrl+C exit"]
+WELCOME_HINTS = [
+    "/help help",
+    "/quit exit",
+    "Ctrl+O debug",
+    "Ctrl+T show tools",
+    "Esc cancel",
+    "Ctrl+C exit",
+]
 
 # Per-request item count for ``client.sessions.list_items``
 # pagination. Matches the server's
@@ -4395,11 +4402,37 @@ async def _cmd_help(
 ) -> None:
     from rich.text import Text
 
-    lines = []
-    for name, (desc, _) in COMMANDS.items():
-        if name in ("/?", "/exit"):
-            continue  # Skip aliases.
-        lines.append(f"  [{fmt.accent}]{name}[/{fmt.accent}]  [{fmt.muted}]{desc}[/{fmt.muted}]")
+    # Grouped, column-aligned command help instead of a flat alphabetical
+    # wall. Commands not listed in a group still render (under "Other"), so a
+    # newly registered command is never silently hidden from /help.
+    groups: list[tuple[str, list[str]]] = [
+        ("Chat", ["/new", "/clear", "/switch", "/fork", "/history", "/cancel"]),
+        ("Context", ["/compact", "/context", "/model", "/effort"]),
+        ("Display", ["/theme"]),
+        ("Diagnostics", ["/logs", "/report"]),
+        ("Help", ["/help", "/quit"]),
+    ]
+    visible = {n: d for n, (d, _) in COMMANDS.items() if n not in ("/?", "/exit")}
+    grouped = {name for _, names in groups for name in names}
+    leftover = [n for n in visible if n not in grouped]
+    if leftover:
+        groups.append(("Other", leftover))
+
+    name_width = max((len(n) for n in visible), default=0)
+    lines: list[str] = []
+    for title, names in groups:
+        rows = [(n, visible[n]) for n in names if n in visible]
+        if not rows:
+            continue
+        if lines:
+            lines.append("")  # blank line between sections
+        lines.append(f"  [{fmt.muted}]{title}[/{fmt.muted}]")
+        for name, desc in rows:
+            padded = name.ljust(name_width)
+            lines.append(
+                f"    [{fmt.accent}]{padded}[/{fmt.accent}]  "
+                f"[{fmt.muted}]{desc}[/{fmt.muted}]"
+            )
     host.output(Text.from_markup("\n".join(lines)))
 
 
