@@ -151,6 +151,12 @@ def _build_gemini_settings(
             "RUNNER_SERVER_URL": server_url,
             "OMNIGENT_SESSION_ID": session_id,
         }
+        # Propagate auth token when present; MCP server attaches it as Bearer.
+        # ponytail: covers local (auth disabled) and OMNIGENT_REMOTE_AUTH_TOKEN deployments;
+        # bridge-dir auth (claude_native pattern) is the upgrade for multi-tenant.
+        auth_token = os.environ.get("OMNIGENT_REMOTE_AUTH_TOKEN", "")
+        if auth_token:
+            mcp_env["OMNIGENT_REMOTE_AUTH_TOKEN"] = auth_token
         settings["mcpServers"] = {
             "omnigent": {
                 "command": sys.executable,

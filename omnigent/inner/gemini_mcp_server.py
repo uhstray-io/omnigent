@@ -52,9 +52,12 @@ def _dispatch_tool(tool_name: str, arguments: dict[str, Any]) -> str:  # type: i
         separators=(",", ":"),
     ).encode("utf-8")
 
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    auth_token = os.environ.get("OMNIGENT_REMOTE_AUTH_TOKEN", "")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
     # ponytail: MCP bridge returns tool results as text only; policy ASK/input_required
     # flows are not bridged — add resultType handling here when needed
-    headers: dict[str, str] = {"Content-Type": "application/json"}
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
