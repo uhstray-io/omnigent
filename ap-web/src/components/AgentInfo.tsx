@@ -640,7 +640,7 @@ function SessionMcpSection({
           className="text-[10px] text-amber-600 dark:text-amber-400"
           data-testid="mcp-reconnect-hint"
         >
-          Reconnect the session for changes to take effect
+          Changes take effect on the next message
         </p>
       )}
       <AddMcpServerDialog

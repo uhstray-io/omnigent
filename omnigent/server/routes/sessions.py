@@ -6436,6 +6436,36 @@ async def _reset_runner_resources_after_switch(session_id: str) -> None:
     _publish_changed_files_invalidated(session_id)
 
 
+async def _reload_runner_spec(session_id: str) -> None:
+    """Best-effort reload of the runner's cached agent spec after a bundle PUT.
+
+    Calls the runner's ``POST /v1/sessions/{id}/reload-spec`` endpoint,
+    which drops the spec cache and MCP tool schemas so the next turn
+    re-resolves the spec from the updated bundle. Lighter than
+    ``/reset-state``: does NOT tear down terminals or environments.
+
+    Fire-and-forget — a runner hiccup must not break the already-committed
+    PUT response.
+
+    :param session_id: Session/conversation id whose spec was updated.
+    """
+    try:
+        runner_client = await _get_runner_client_for_resource_access(session_id)
+        if runner_client is None:
+            return
+        resp = await runner_client.post(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/reload-spec",
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+    except (httpx.HTTPError, HTTPException, OmnigentError, RuntimeError):
+        _logger.warning(
+            "post-PUT runner spec reload failed for session=%s",
+            session_id,
+            exc_info=True,
+        )
+
+
 def _is_native_terminal_session(conv: Conversation) -> bool:
     """
     Return whether a session is owned by a terminal-native wrapper.
@@ -18392,6 +18422,16 @@ def create_sessions_router(
             agent_cache.replace(
                 agent.id, new_loc, bundle_bytes, expand_env=agent.session_id is None
             )
+
+        # Best-effort: tell the runner to drop its cached spec so the
+        # next turn picks up the updated bundle (added/removed MCP
+        # servers, changed instructions, etc.).  Fire-and-forget —
+        # a runner hiccup must not break the already-committed PUT.
+        _task = asyncio.create_task(
+            _reload_runner_spec(session_id),
+            name=f"reload-spec:{session_id}",
+        )
+        _task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
         return _to_agent_object(updated, agent_cache)
 

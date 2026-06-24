@@ -13465,6 +13465,36 @@ def create_runner_app(
             },
         )
 
+    @app.post("/v1/sessions/{session_id}/reload-spec")
+    async def reload_session_spec(session_id: str) -> JSONResponse:
+        """Invalidate the runner's cached agent spec for a session.
+
+        Runner-internal endpoint the AP server calls after updating an
+        agent's bundle via ``PUT /v1/sessions/{id}/agent``.  Drops the
+        spec cache and MCP tool schemas so the next turn re-resolves
+        the spec from the server (picking up added/removed MCP servers,
+        changed instructions, etc.).
+
+        Lighter than ``/reset-state``: does NOT tear down terminals,
+        environments, or the harness subprocess — only the spec-derived
+        caches that control which tools are available.
+
+        :param session_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        :returns: Confirmation that the spec cache was invalidated.
+        """
+        _session_spec_cache.pop(session_id, None)
+        _session_skills_cache.pop(session_id, None)
+        _session_tool_schemas.pop(session_id, None)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "session_id": session_id,
+                "object": "session.spec_reloaded",
+                "reloaded": True,
+            },
+        )
+
     @app.post("/v1/sessions/{session_id}/mcp/execute")
     async def mcp_execute(session_id: str, request: Request) -> JSONResponse:
         """Execute a tool call on the runner after AP-server policy evaluation.
