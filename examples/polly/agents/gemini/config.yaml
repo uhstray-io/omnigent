@@ -7,9 +7,12 @@ description: Gemini CLI coding sub-agent — implements, cross-vendor reviews, o
 # bridged sys_os_* tools, so every command passes the policy layer.
 executor:
   type: omnigent
+  # ``model`` is a sibling of ``config`` — the parser reads ``executor.model``
+  # (not ``config.model``) as the source of truth, so it must live here to reach
+  # the harness as HARNESS_GEMINI_MODEL.
+  model: gemini-2.5-flash
   config:
     harness: gemini
-    model: gemini-2.5-flash
 
 prompt: |
   You are Gemini, a coding sub-agent dispatched by the polly

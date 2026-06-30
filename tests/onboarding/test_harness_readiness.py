@@ -169,6 +169,10 @@ def test_configured_harness_map_covers_all_spellings(
         "github-copilot",
         # Hermes Agent harness — gates on the hermes CLI.
         "hermes",
+        # Gemini CLI harness — bare ``gemini`` + ``gemini-cli`` alias; both gate
+        # on the gemini CLI.
+        "gemini",
+        "gemini-cli",
     }
     assert set(result) == expected_keys
 

@@ -65,6 +65,12 @@ _VALID_FAMILIES = (ANTHROPIC_FAMILY, OPENAI_FAMILY)
 # (see :func:`default_provider_for_harness`).
 PI_SURFACE = "pi"
 
+# Display surface for the Gemini CLI harness in the REPL startup creds line.
+# The ``gemini`` CLI harness self-authenticates via ``gemini auth login`` and
+# holds no Omnigent-managed credential, so the header resolves it by CLI
+# presence, not a provider entry (which would always read "not configured").
+GEMINI_CLI_SURFACE = "gemini-cli"
+
 # Accepted ``wire_api`` values. ``responses`` is the OpenAI Responses API;
 # ``chat`` is Chat Completions. Only meaningful for the ``openai`` family
 # (the ``anthropic`` family always speaks the Messages API).

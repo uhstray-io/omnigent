@@ -3675,7 +3675,11 @@ def _spec_used_families(agent_yaml: Path | None) -> list[str]:
     else:
         return []
     try:
-        from omnigent.onboarding.provider_config import PI_SURFACE, harness_family
+        from omnigent.onboarding.provider_config import (
+            GEMINI_CLI_SURFACE,
+            PI_SURFACE,
+            harness_family,
+        )
         from omnigent.spec import parse
 
         spec = parse(root, expand_env=False)
@@ -3697,11 +3701,20 @@ def _spec_used_families(agent_yaml: Path | None) -> list[str]:
             # surface's effective credential (explicit pi default, else
             # the cross-family fallback).
             families.add(PI_SURFACE)
+        elif harness in ("gemini", "gemini-cli"):
+            # The Gemini CLI harness self-authenticates (``gemini auth login``)
+            # and holds no Omnigent credential, so it contributes its own CLI
+            # surface; the header resolves it by CLI presence, not a provider
+            # entry (which would falsely read "not configured").
+            families.add(GEMINI_CLI_SURFACE)
         for child in node.sub_agents:
             _walk(child)
 
     _walk(spec)
-    return sorted(families)
+    # Stable display order for the startup creds line: Claude, Codex, then the
+    # CLI/multi-model surfaces, then anything else alphabetically.
+    order = {"anthropic": 0, "openai": 1, GEMINI_CLI_SURFACE: 2, PI_SURFACE: 3}
+    return sorted(families, key=lambda f: (order.get(f, 99), f))
 
 
 def _run_repl(

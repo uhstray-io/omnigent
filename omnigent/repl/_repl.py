@@ -370,6 +370,7 @@ def _build_startup_header(
     )
     from omnigent.onboarding.detected import effective_config_with_detected
     from omnigent.onboarding.provider_config import (
+        GEMINI_CLI_SURFACE,
         describe_active_credential,
         load_config,
         surface_default_provider,
@@ -391,6 +392,16 @@ def _build_startup_header(
     if len(families) > 1:
         parts: list[str] = []
         for fam in families:
+            if fam == GEMINI_CLI_SURFACE:
+                # The Gemini CLI harness self-authenticates via ``gemini auth
+                # login`` and holds no Omnigent-managed credential, so resolve
+                # it by CLI presence rather than a provider entry (which would
+                # always read "not configured").
+                from omnigent.onboarding.harness_readiness import harness_is_configured
+
+                label = "CLI login" if harness_is_configured("gemini") else "not configured"
+                parts.append(f"Gemini → {label}")
+                continue
             # Effective per-surface default — for the pi surface this is
             # what the pi harness would actually route through (explicit
             # pi scope, else the cross-family fallback).
