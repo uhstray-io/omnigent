@@ -82,7 +82,16 @@ async def test_tool_and_thought_events_emit_progress(tmp_path) -> None:
             {"type": "tool_use", "tool_name": "search", "tool_id": "c1", "parameters": {"q": "x"}},
             {"type": "tool_result", "tool_id": "c1", "status": "success", "output": "done"},
             {"type": "message", "role": "assistant", "content": "answer"},
-            {"type": "result", "status": "success", "stats": {}},
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                    "cached": 30,
+                },
+            },
         ]
     )
     events = await _collect(executor, proc)
@@ -93,7 +102,15 @@ async def test_tool_and_thought_events_emit_progress(tmp_path) -> None:
     done = next(e for e in events if isinstance(e, ToolCallComplete))
     assert done.name == "search" and done.status is ToolCallStatus.SUCCESS
     assert any(isinstance(e, TextChunk) and e.text == "answer" for e in events)
-    assert isinstance(events[-1], TurnComplete) and events[-1].response == "answer"
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete) and complete.response == "answer"
+    # Usage is read from result.stats (not `usage`); `cached` → cache_read.
+    assert complete.usage == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "cache_read_input_tokens": 30,
+    }
 
 
 @pytest.mark.asyncio

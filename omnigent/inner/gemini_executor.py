@@ -506,10 +506,30 @@ class GeminiExecutor(Executor):
 def _extract_usage(event: dict[str, Any]) -> dict[str, Any] | None:  # type: ignore[explicit-any]
     """Extract token usage from a Gemini ``result`` event if present.
 
+    Gemini's stream-json success result carries usage under ``stats``
+    (``{"total_tokens", "input_tokens", "output_tokens", "cached", ...}``),
+    not ``usage``. We read ``stats`` first and fall back to the
+    ``usage``/``usageMetadata`` GenAI-style shapes.
+
     :param event: The parsed JSONL result event.
     :returns: An Omnigent-compatible usage dict, or ``None`` when the
         event carries no usage data.
     """
+    stats = event.get("stats")
+    if isinstance(stats, dict):
+        input_tokens = int(stats.get("input_tokens") or 0)
+        output_tokens = int(stats.get("output_tokens") or 0)
+        if input_tokens or output_tokens:
+            result: dict[str, Any] = {  # type: ignore[explicit-any]
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": int(stats.get("total_tokens") or (input_tokens + output_tokens)),
+            }
+            cached = int(stats.get("cached") or 0)
+            if cached:
+                result["cache_read_input_tokens"] = cached
+            return result
+
     usage = event.get("usage") or event.get("usageMetadata")
     if not isinstance(usage, dict):
         return None
