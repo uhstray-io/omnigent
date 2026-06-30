@@ -51,7 +51,11 @@ from omnigent.inner.executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
+    ReasoningChunk,
     TextChunk,
+    ToolCallComplete,
+    ToolCallRequest,
+    ToolCallStatus,
     ToolSpec,
     TurnComplete,
 )
@@ -60,6 +64,45 @@ _logger = logging.getLogger(__name__)
 
 # Maximum seconds to wait for a Gemini subprocess to complete a single turn.
 _GEMINI_TURN_TIMEOUT_S = 600.0
+
+# Gemini CLI FatalError exit codes (see @google/gemini-cli FatalError classes).
+# Used to turn a bare exit code into a diagnosable message and to decide whether
+# a retry could possibly help.
+_GEMINI_EXIT_CODES: dict[int, str] = {
+    41: "FatalAuthenticationError",
+    42: "FatalInputError",
+    44: "FatalSandboxError",
+    52: "FatalConfigError",
+    53: "FatalTurnLimitedError",
+    54: "FatalToolExecutionError",
+    55: "FatalUntrustedWorkspaceError",
+    130: "FatalCancellationError",
+}
+# Exit codes worth retrying: transient/limit failures. Input/auth/config/trust
+# errors recur with identical input, so they are NOT retryable.
+_GEMINI_RETRYABLE_EXITS = frozenset({53, 54})
+
+
+def _escape_at_commands(text: str) -> str:
+    """Backslash-escape ``@`` tokens so Gemini doesn't treat them as @file includes.
+
+    Gemini's non-interactive ``-p`` path runs the prompt through its
+    at-command parser (regex ``(?<!\\)@<path>``). Any ``@token`` that
+    looks like a path (e.g. ``@uhstray.io`` in an email, ``@scope/pkg``)
+    is resolved as a file include; when the file doesn't exist Gemini
+    aborts the whole turn with ``FatalInputError`` (exit 42).
+
+    We mirror Gemini's own trigger regex: escape ``@`` → ``\\@`` only when
+    it precedes a non-space char (``(?=\S)``) and is not already escaped
+    (``(?<!\\)``), so prose like ``email @ work`` and an already-escaped
+    ``\\@`` are both left untouched.
+
+    ponytail: this disables Gemini's local @file include feature, which
+    the Omnigent harness never uses — files reach Gemini via MCP tools.
+    """
+    import re
+
+    return re.sub(r"(?<!\\)@(?=\S)", r"\\@", text)
 
 
 def _session_key(messages: list[Message]) -> str:
@@ -247,6 +290,10 @@ class GeminiExecutor(Executor):
             prompt = f"{system_prompt.strip()}\n\n{prompt}"
             # ponytail: system prompt prepended as text; GEMINI.md injection is the upgrade path
 
+        # Neutralize @file-include expansion so stray @tokens (emails, scoped
+        # package names) can't abort the turn with FatalInputError (exit 42).
+        prompt = _escape_at_commands(prompt)
+
         model = (config.model if config else None) or self._model
 
         # Write the .gemini/settings.json MCP bridge config when we have a
@@ -314,11 +361,20 @@ class GeminiExecutor(Executor):
 
         accumulated_text: list[str] = []
         yielded_complete = False
+        # call_id → tool name, so tool_result events (which carry only an id)
+        # can be paired back to the tool_use that started them.
+        pending_tools: dict[str, str] = {}
+        # Keep the tail of stderr so a nonzero exit can report WHY, not just
+        # the bare code (Gemini writes its FatalError message here).
+        from collections import deque
+
+        stderr_tail: deque[str] = deque(maxlen=10)
 
         async def _drain_stderr() -> None:
             async for raw in proc.stderr:  # type: ignore[union-attr]
                 line = raw.decode("utf-8", errors="replace").rstrip()
                 if line:
+                    stderr_tail.append(line)
                     _logger.debug("gemini stderr: %s", line)
 
         stderr_task = asyncio.create_task(_drain_stderr())
@@ -346,22 +402,69 @@ class GeminiExecutor(Executor):
                             accumulated_text.append(text)
                             yield TextChunk(text=text)
 
-                    elif etype == "result":
-                        result_text = event.get("result") or event.get("text") or ""
-                        if not isinstance(result_text, str):
-                            result_text = json.dumps(result_text)
-                        # Prefer the accumulated streaming text when available
-                        final = "".join(accumulated_text) or result_text or None
-                        state.first_turn = False  # must set before yield
-                        yield TurnComplete(response=final, usage=_extract_usage(event))
-                        yielded_complete = True
+                    elif etype == "thought":
+                        # Reasoning/thinking output. Emitting it keeps the
+                        # harness idle watchdog alive during long think phases.
+                        thought = (
+                            event.get("thought") or event.get("content") or event.get("text") or ""
+                        )
+                        if isinstance(thought, dict):
+                            thought = thought.get("thought") or thought.get("description") or ""
+                        if isinstance(thought, str) and thought:
+                            yield ReasoningChunk(delta=thought, event_type="reasoning_text")
 
-                    elif etype == "error":
-                        msg = event.get("message") or event.get("error") or "Gemini error"
-                        yield ExecutorError(message=str(msg), retryable=False)
-                        yielded_complete = True
+                    elif etype == "tool_use":
+                        # Gemini runs the tool itself (via MCP); surface the
+                        # call so the turn shows progress and the idle
+                        # watchdog resets during long tool loops.
+                        name = str(event.get("tool_name") or event.get("name") or "tool")
+                        call_id = str(event.get("tool_id") or event.get("id") or "")
+                        tool_args = event.get("parameters") or event.get("args") or {}
+                        if call_id:
+                            pending_tools[call_id] = name
+                        yield ToolCallRequest(
+                            name=name,
+                            args=tool_args if isinstance(tool_args, dict) else {},
+                            metadata={"call_id": call_id} if call_id else {},
+                        )
 
-                    # init / tool_use / tool_result → skip (Gemini handles internally)
+                    elif etype == "tool_result":
+                        call_id = str(event.get("tool_id") or event.get("id") or "")
+                        name = pending_tools.pop(call_id, "tool")
+                        ok = event.get("status") != "error"
+                        yield ToolCallComplete(
+                            name=name,
+                            status=ToolCallStatus.SUCCESS if ok else ToolCallStatus.ERROR,
+                            result=event.get("output"),
+                            error=None if ok else str(event.get("output") or "tool error"),
+                            metadata={"call_id": call_id} if call_id else {},
+                        )
+
+                    elif etype in ("result", "error"):
+                        # Gemini reports failures as a `result` with
+                        # status=="error" (or, rarely, a top-level `error`).
+                        # We don't break after a terminal event: the consumer
+                        # (_executor_adapter) stops on the first one and closes
+                        # this generator, so trailing events are never observed.
+                        err = event.get("error")
+                        if event.get("status") == "error" or etype == "error":
+                            if isinstance(err, dict):
+                                msg = err.get("message") or err.get("type") or "Gemini error"
+                            else:
+                                msg = err or event.get("message") or "Gemini error"
+                            yield ExecutorError(message=str(msg), retryable=False)
+                            yielded_complete = True
+                        else:
+                            result_text = event.get("result") or event.get("text") or ""
+                            if not isinstance(result_text, str):
+                                result_text = json.dumps(result_text)
+                            # Prefer the accumulated streaming text when available
+                            final = "".join(accumulated_text) or result_text or None
+                            state.first_turn = False  # must set before yield
+                            yield TurnComplete(response=final, usage=_extract_usage(event))
+                            yielded_complete = True
+
+                    # init → skip (one-time session marker)
 
         except asyncio.TimeoutError:
             yield ExecutorError(
@@ -370,7 +473,12 @@ class GeminiExecutor(Executor):
             )
             yielded_complete = True
         finally:
-            stderr_task.cancel()
+            # Let stderr finish draining so a nonzero exit can report its
+            # reason; cancel only if it's wedged.
+            try:
+                await asyncio.wait_for(stderr_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                stderr_task.cancel()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
             except (asyncio.TimeoutError, ProcessLookupError):
@@ -378,10 +486,14 @@ class GeminiExecutor(Executor):
                     proc.kill()
 
         if not yielded_complete:
-            if proc.returncode != 0 and proc.returncode is not None:
+            code = proc.returncode
+            if code is not None and code != 0:
+                name = _GEMINI_EXIT_CODES.get(code, "")
+                detail = "; ".join(stderr_tail) if stderr_tail else "no stderr captured"
+                label = f"{code} ({name})" if name else str(code)
                 yield ExecutorError(
-                    message=f"Gemini exited with code {proc.returncode}",
-                    retryable=True,
+                    message=f"Gemini exited with code {label}: {detail}",
+                    retryable=code in _GEMINI_RETRYABLE_EXITS,
                 )
             else:
                 final = "".join(accumulated_text) or None
@@ -399,10 +511,30 @@ class GeminiExecutor(Executor):
 def _extract_usage(event: dict[str, Any]) -> dict[str, Any] | None:  # type: ignore[explicit-any]
     """Extract token usage from a Gemini ``result`` event if present.
 
+    Gemini's stream-json success result carries usage under ``stats``
+    (``{"total_tokens", "input_tokens", "output_tokens", "cached", ...}``),
+    not ``usage``. We read ``stats`` first and fall back to the
+    ``usage``/``usageMetadata`` GenAI-style shapes.
+
     :param event: The parsed JSONL result event.
     :returns: An Omnigent-compatible usage dict, or ``None`` when the
         event carries no usage data.
     """
+    stats = event.get("stats")
+    if isinstance(stats, dict):
+        input_tokens = int(stats.get("input_tokens") or 0)
+        output_tokens = int(stats.get("output_tokens") or 0)
+        if input_tokens or output_tokens:
+            result: dict[str, Any] = {  # type: ignore[explicit-any]
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": int(stats.get("total_tokens") or (input_tokens + output_tokens)),
+            }
+            cached = int(stats.get("cached") or 0)
+            if cached:
+                result["cache_read_input_tokens"] = cached
+            return result
+
     usage = event.get("usage") or event.get("usageMetadata")
     if not isinstance(usage, dict):
         return None
