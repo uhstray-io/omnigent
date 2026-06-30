@@ -70,6 +70,8 @@ def test_escape_at_commands_escapes_only_path_like_tokens() -> None:
     assert _escape_at_commands("@scope/pkg") == "\\@scope/pkg"
     # A bare @ followed by whitespace is not an at-command trigger — left alone.
     assert _escape_at_commands("meet @ noon") == "meet @ noon"
+    # Already-escaped @ must not be double-escaped (matches Gemini's (?<!\\) rule).
+    assert _escape_at_commands("\\@already") == "\\@already"
 
 
 @pytest.mark.asyncio
@@ -139,3 +141,31 @@ async def test_exit_42_reports_fatal_input_error_with_stderr(tmp_path) -> None:
     assert "42" in err.message and "FatalInputError" in err.message
     assert "@ command" in err.message
     assert err.retryable is False  # bad input recurs on retry
+
+
+@pytest.mark.asyncio
+async def test_transient_exit_is_retryable(tmp_path) -> None:
+    """Turn-limit/tool-exec exits (53/54) are transient → retryable."""
+    executor = GeminiExecutor(gemini_path="/bin/fake-gemini", cwd=str(tmp_path))
+    proc = _fake_proc([], returncode=54, stderr=["tool blew up"])
+    events = await _collect(executor, proc)
+
+    assert len(events) == 1
+    err = events[0]
+    assert isinstance(err, ExecutorError)
+    assert "54" in err.message and "FatalToolExecutionError" in err.message
+    assert err.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_unknown_exit_code_has_bare_label(tmp_path) -> None:
+    """An unmapped exit code uses the bare number (no parenthesized name)."""
+    executor = GeminiExecutor(gemini_path="/bin/fake-gemini", cwd=str(tmp_path))
+    proc = _fake_proc([], returncode=99, stderr=["mystery"])
+    events = await _collect(executor, proc)
+
+    assert len(events) == 1
+    err = events[0]
+    assert isinstance(err, ExecutorError)
+    assert "code 99:" in err.message and "(" not in err.message
+    assert err.retryable is False

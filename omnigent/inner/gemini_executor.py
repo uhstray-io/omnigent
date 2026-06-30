@@ -92,15 +92,17 @@ def _escape_at_commands(text: str) -> str:
     is resolved as a file include; when the file doesn't exist Gemini
     aborts the whole turn with ``FatalInputError`` (exit 42).
 
-    Escaping ``@`` → ``\\@`` only where it precedes a non-space char (the
-    exact at-command trigger) leaves prose like ``email @ work`` untouched.
+    We mirror Gemini's own trigger regex: escape ``@`` → ``\\@`` only when
+    it precedes a non-space char (``(?=\S)``) and is not already escaped
+    (``(?<!\\)``), so prose like ``email @ work`` and an already-escaped
+    ``\\@`` are both left untouched.
 
     ponytail: this disables Gemini's local @file include feature, which
     the Omnigent harness never uses — files reach Gemini via MCP tools.
     """
     import re
 
-    return re.sub(r"@(?=\S)", r"\\@", text)
+    return re.sub(r"(?<!\\)@(?=\S)", r"\\@", text)
 
 
 def _session_key(messages: list[Message]) -> str:
@@ -441,6 +443,9 @@ class GeminiExecutor(Executor):
                     elif etype in ("result", "error"):
                         # Gemini reports failures as a `result` with
                         # status=="error" (or, rarely, a top-level `error`).
+                        # We don't break after a terminal event: the consumer
+                        # (_executor_adapter) stops on the first one and closes
+                        # this generator, so trailing events are never observed.
                         err = event.get("error")
                         if event.get("status") == "error" or etype == "error":
                             if isinstance(err, dict):
