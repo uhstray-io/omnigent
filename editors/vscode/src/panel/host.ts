@@ -8,8 +8,9 @@
  *
  * Render decision: the iframe path is used ONLY for LOCAL servers — a local
  * server needs no auth, so no token ever lands in a navigable URL. Non-local
- * targets are rejected upstream (config.resolveServerTarget) and never reach
- * here; until a local target resolves, the controller shows renderResolvingHtml.
+ * targets are never framed here; `openAgentWebUI` routes them to the external
+ * browser. Until a local target resolves, the controller shows
+ * renderResolvingHtml.
  */
 import * as vscode from "vscode";
 import * as crypto from "node:crypto";

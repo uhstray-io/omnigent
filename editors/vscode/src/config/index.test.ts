@@ -20,7 +20,7 @@ describe("originOf", () => {
   });
 });
 
-describe("resolveServerTarget (localhost-only)", () => {
+describe("resolveServerTarget (local + remote)", () => {
   it("manual loopback override wins over discovered local", () => {
     const r = resolveServerTarget(
       { serverUrl: "http://127.0.0.1:9000" },
@@ -34,17 +34,32 @@ describe("resolveServerTarget (localhost-only)", () => {
     }
   });
 
-  it("rejects a manual REMOTE override (remote-unsupported)", () => {
+  it("resolves a manual REMOTE override (drives the external-browser path)", () => {
     const r = resolveServerTarget(
       { serverUrl: "https://omnigent.example.com" },
       { found: true, baseUrl: "http://127.0.0.1:6767", health: "ok" },
     );
-    expect(r).toEqual({ status: "needs-prompt", reason: "remote-unsupported" });
+    expect(r.status).toBe("resolved");
+    if (r.status === "resolved") {
+      expect(r.target.source).toBe("manual");
+      expect(r.target.hostType).toBe("remote");
+      expect(r.target.baseUrl).toBe("https://omnigent.example.com");
+    }
   });
 
-  it("rejects a malformed manual override (unknown -> remote-unsupported)", () => {
+  it("rejects a malformed manual override (unknown -> malformed-url)", () => {
     const r = resolveServerTarget({ serverUrl: "not a url" }, { found: false });
-    expect(r).toEqual({ status: "needs-prompt", reason: "remote-unsupported" });
+    expect(r).toEqual({ status: "needs-prompt", reason: "malformed-url" });
+  });
+
+  it("treats both 127.0.0.1 and localhost as local", () => {
+    for (const url of ["http://127.0.0.1:6767", "http://localhost:6767"]) {
+      const r = resolveServerTarget({ serverUrl: url }, { found: false });
+      expect(r.status).toBe("resolved");
+      if (r.status === "resolved") {
+        expect(r.target.hostType).toBe("local");
+      }
+    }
   });
 
   it("uses discovered local when healthy and no manual override", () => {

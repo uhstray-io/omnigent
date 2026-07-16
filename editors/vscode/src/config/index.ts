@@ -1,14 +1,16 @@
 /**
  * Config + server-target + host-type resolution.
  *
- * Resolution order: manual override (serverUrl set) > auto-discovered local >
- * (caller prompts). This build is LOCALHOST-ONLY: a manual override that does
- * not resolve to a loopback host is rejected (the iframe render path only hosts
- * local servers). All decision logic is pure and isolated from the VS Code API
+ * Resolution order: manual override (serverUrl set) > auto-discovered local.
+ * A manual override may point at a LOCAL or a REMOTE server — the iframe render
+ * path is used for local servers only, while a remote override drives the
+ * external-browser path in `openAgentWebUI`. A malformed override is rejected
+ * (malformed-url). All decision logic is pure and isolated from the VS Code API
  * behind the `Settings` interface so it is unit-testable without an IDE host.
  * The thin VS Code adapter lives in vscodeSettings.ts.
  */
 import type { HealthOutcome } from "../discovery";
+import type { ProfileSetting } from "../profiles";
 
 export type HostType = "local" | "remote" | "unknown";
 
@@ -20,9 +22,18 @@ export interface ServerTarget {
   source: "manual" | "discovered";
 }
 
-/** Thin, stubbable settings surface (isolates the vscode API). */
+/**
+ * Thin, stubbable settings surface (isolates the vscode API). Carries every
+ * `omnigent.*` setting the extension reads; `resolveServerTarget` only needs
+ * `serverUrl`, the rest is consumed by the command layer.
+ */
 export interface Settings {
   serverUrl: string;
+  agentConfigPath: string;
+  profiles: ProfileSetting[];
+  autoOpenUI: boolean;
+  uiColumn: "beside" | "active";
+  terminalLocation: "editor" | "panel";
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
@@ -78,14 +89,13 @@ export type TargetResolution =
   | { status: "resolved"; target: ServerTarget }
   | {
       status: "needs-prompt";
-      reason: "no-manual-no-local" | "local-unhealthy" | "remote-unsupported";
+      reason: "no-manual-no-local" | "local-unhealthy" | "malformed-url";
     };
 
 /**
  * Resolve a server target purely from settings + a discovery summary.
- *  1. manual override (serverUrl non-empty) wins — but ONLY if it is loopback;
- *     a non-loopback / malformed override is rejected (remote-unsupported),
- *     because the iframe render path hosts local servers only.
+ *  1. manual override (serverUrl non-empty) wins — it may be LOCAL (iframe
+ *     pane) or REMOTE (external browser); only a malformed URL is rejected.
  *  2. else auto-discovered local with health === 'ok'
  *  3. else needs-prompt
  */
@@ -95,10 +105,9 @@ export function resolveServerTarget(
 ): TargetResolution {
   const manual = settings.serverUrl?.trim() ?? "";
   if (manual !== "") {
-    // Classify FIRST (catch-safe) so a malformed URL never throws before the
-    // host-type gate; both "remote" and "unknown" are rejected.
-    if (hostTypeOf(manual) !== "local") {
-      return { status: "needs-prompt", reason: "remote-unsupported" };
+    const hostType = hostTypeOf(manual);
+    if (hostType === "unknown") {
+      return { status: "needs-prompt", reason: "malformed-url" };
     }
     return { status: "resolved", target: manualTarget(manual) };
   }

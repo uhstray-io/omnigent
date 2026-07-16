@@ -5,10 +5,16 @@
  */
 import * as vscode from "vscode";
 import type { Settings } from "./index";
+import type { ProfileSetting } from "../profiles";
 
 export function readSettings(): Settings {
   const cfg = vscode.workspace.getConfiguration("omnigent");
   return {
     serverUrl: cfg.get<string>("serverUrl", ""),
+    agentConfigPath: cfg.get<string>("agentConfigPath", ""),
+    profiles: cfg.get<ProfileSetting[]>("profiles", []),
+    autoOpenUI: cfg.get<boolean>("autoOpenUI", false),
+    uiColumn: cfg.get<"beside" | "active">("uiColumn", "beside"),
+    terminalLocation: cfg.get<"editor" | "panel">("terminalLocation", "editor"),
   };
 }

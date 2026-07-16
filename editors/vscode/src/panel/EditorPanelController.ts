@@ -33,16 +33,16 @@ export class EditorPanelController {
   }
 
   /** Create-or-reveal the editor-beside panel and render it. */
-  ensure(): void {
+  ensure(viewColumn: vscode.ViewColumn = vscode.ViewColumn.Beside): void {
     if (this.panel) {
-      this.panel.reveal(vscode.ViewColumn.Beside);
+      this.panel.reveal(viewColumn);
       this.render(this.panel.webview);
       return;
     }
     const panel = vscode.window.createWebviewPanel(
       "omnigent",
       "Omnigent",
-      vscode.ViewColumn.Beside,
+      viewColumn,
       {
         enableScripts: true,
         retainContextWhenHidden: true,
