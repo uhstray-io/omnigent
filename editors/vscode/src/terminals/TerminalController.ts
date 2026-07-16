@@ -177,20 +177,25 @@ export class TerminalController {
   // ── omnigent.stop ──────────────────────────────────────────────────────
   /**
    * Quick-pick between stopping the server and closing agent terminal(s). A
-   * healthy local server found via discovery counts as "server active" even
-   * when the extension didn't start it — stopping that shared server is an
-   * explicit, confirmed choice. If only one category is active, act on it
-   * directly without the quick-pick.
+   * server is "active" if the extension owns its terminal OR a local pidfile
+   * server is healthy — but a pidfile probe is only run when no
+   * `omnigent.serverUrl` override is set, so the override wins on Stop too and
+   * a remote override never offers to stop an unrelated local server. Stopping
+   * a shared (discovered, not extension-owned) server is an explicit, confirmed
+   * choice. If only one category is active, act on it directly without the
+   * quick-pick.
    */
   async stop(): Promise<void> {
     this.invalidate();
     const gen = this.generation;
     const agentActive = this.agents.size() > 0;
-    const discovery = await this.discover();
+    const discovery = await this.discoverForStop();
     if (gen !== this.generation) {
       return;
     }
-    const serverActive = discovery.found && discovery.health === "ok";
+    const serverActive =
+      this.serverTerminal !== undefined ||
+      (discovery.found && discovery.health === "ok");
     if (!serverActive && !agentActive) {
       void vscode.window.showInformationMessage("Omnigent: nothing is running.");
       return;
@@ -281,9 +286,11 @@ export class TerminalController {
 
   // ── internals ─────────────────────────────────────────────────────────
   /**
-   * Stop a server. One the extension started is stopped outright; a shared
-   * server the extension only discovered warns (it may back other sessions)
-   * and requires confirmation before `omnigent server stop` tears it down.
+   * Stop a server. One the extension started is closed outright (no modal); a
+   * shared server the extension only discovered warns (it may back other
+   * sessions) and requires confirmation before `omnigent server stop` tears
+   * it down. The execFile callback is generation-gated so a stop superseded by
+   * a newer launch, a dispose, or a terminal close can't write state.
    */
   private async stopServer(discovery?: LocalDiscovery): Promise<void> {
     if (this.serverTerminal) {
@@ -293,7 +300,7 @@ export class TerminalController {
       void this.refreshServerState();
       return;
     }
-    const d = discovery ?? (await this.discover());
+    const d = discovery ?? (await this.discoverForStop());
     if (!d.found) {
       void vscode.window.showInformationMessage(
         "Omnigent: no running server found.",
@@ -308,11 +315,15 @@ export class TerminalController {
     if (confirm !== "Stop") {
       return;
     }
+    const gen = this.generation;
     execFile(
       "omnigent",
       ["server", "stop"],
       { timeout: SERVER_STOP_TIMEOUT_MS },
       (err) => {
+        if (gen !== this.generation) {
+          return;
+        }
         if (err) {
           this.output.appendLine(
             `[omnigent] server stop failed: ${err.message}`,
@@ -384,6 +395,20 @@ export class TerminalController {
 
   private async discover(): Promise<LocalDiscovery> {
     return discoverLocalServer(undefined, DEFAULT_HEALTH_TIMEOUT_MS);
+  }
+
+  /**
+   * Discovery for the Stop path. When `omnigent.serverUrl` is set the override
+   * is the server target — there is no local pidfile server to stop via
+   * `omnigent server stop` — so this skips the pidfile probe and returns
+   * not-found. Only an extension-owned terminal or a real local discovery can
+   * make Stop offer the server choice.
+   */
+  private async discoverForStop(): Promise<LocalDiscovery> {
+    if (readSettings().serverUrl.trim() !== "") {
+      return { found: false, reason: "no-pidfile" };
+    }
+    return this.discover();
   }
 
   /**
