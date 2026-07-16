@@ -54,6 +54,8 @@ export class TerminalController {
    * session, and two near-simultaneous launches can't double-apply.
    */
   private generation = 0;
+  /** Set by dispose() so async callbacks can hard-stop without touching state. */
+  private disposed = false;
 
   constructor(
     private readonly output: vscode.OutputChannel,
@@ -274,6 +276,7 @@ export class TerminalController {
 
   /** Dispose every terminal the extension spawned + the status bar. */
   dispose(): void {
+    this.disposed = true;
     this.invalidate();
     this.serverTerminal?.dispose();
     this.serverTerminal = undefined;
@@ -321,7 +324,7 @@ export class TerminalController {
       ["server", "stop"],
       { timeout: SERVER_STOP_TIMEOUT_MS },
       (err) => {
-        if (gen !== this.generation) {
+        if (this.disposed) {
           return;
         }
         if (err) {
@@ -333,7 +336,12 @@ export class TerminalController {
           );
           return;
         }
-        this.invalidate();
+        // On a benign generation bump (an agent terminal closed or a fresh
+        // poll started while the stop was in flight) don't silently drop the
+        // state update — reconcile against actual discovered state.
+        if (gen === this.generation) {
+          this.invalidate();
+        }
         void this.refreshServerState();
       },
     );
