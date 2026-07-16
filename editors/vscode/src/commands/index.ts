@@ -1,10 +1,6 @@
 /**
- * Command registration for the 4-command surface (v0.2.0).
- *
- * Each command is a thin delegator into the shared TerminalController; the
- * decision logic lives in pure modules (profiles, config, sessionRegistry,
- * statusBar). Registering them in one place mirrors the v0.1.0
- * `registerOpenPanel(context, controller)` shape, extended to the full set.
+ * Command registration. Each command is a thin delegator into the shared
+ * TerminalController; the decision logic lives in the pure modules.
  */
 import * as vscode from "vscode";
 import type { TerminalController } from "../terminals/TerminalController";

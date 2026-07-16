@@ -2,11 +2,10 @@
  * Unique-id session tracking for spawned agent terminals (pure).
  *
  * Each `omnigent.openAgentTerminal` invocation must spawn an INDEPENDENT
- * terminal even for the same profile — so sessions are keyed by a unique
- * counter id, never by profile name. (Keying by profile name is the bug that
- * made a second click silently focus the existing terminal instead of opening
- * a new one.) This module is plain data logic with no VS Code API so the
- * keying / stop semantics can be unit-tested directly.
+ * terminal even for the same profile, so sessions are keyed by a unique
+ * counter id rather than by profile name — that way repeated clicks open
+ * concurrent terminals and Stop can target each one. Plain data logic with no
+ * VS Code API so the keying / stop semantics can be unit-tested directly.
  */
 export interface AgentSession<P, T> {
   id: number;

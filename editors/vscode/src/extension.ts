@@ -1,22 +1,13 @@
 /**
- * Omnigent VS Code extension entry point (4-command build, v0.2.0).
+ * Omnigent VS Code extension entry point.
  *
- * activate() wires:
- *  - Config / local-server discovery
- *  - A minimal activity-bar tree view whose welcome content offers Start
- *    Server / Open Agent Terminal / Open Agent WebUI
- *  - EditorPanelController: the editor-beside iframe surface (local WebUI)
- *  - TerminalController: every terminal the extension spawns + the server-state
- *    status bar; hosts the 4 commands (startServer / openAgentTerminal /
- *    openAgentWebUI / stop) and the internal status-bar launcher
- *
- * deactivate() disposes every terminal the extension spawned (server + agents)
- * and the editor panel.
+ * activate() wires the activity-bar tree view, the editor-beside iframe panel,
+ * and the TerminalController (server + agent terminals, status bar, the 4
+ * commands). Server state is owned by TerminalController.refreshServerState(),
+ * called once at activation so the status bar reflects a server that was
+ * already running. deactivate() disposes every spawned terminal + the panel.
  */
 import * as vscode from "vscode";
-import { discoverLocalServer, DEFAULT_HEALTH_TIMEOUT_MS } from "./discovery";
-import { resolveServerTarget } from "./config";
-import { readSettings } from "./config/vscodeSettings";
 import { EditorPanelController } from "./panel/EditorPanelController";
 import { TerminalController } from "./terminals/TerminalController";
 import { registerCommands } from "./commands";
@@ -47,44 +38,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(output);
   output.appendLine("[omnigent] activating");
 
-  // ── Editor-beside iframe surface (local WebUI) ──────────────────────────
   panel = new EditorPanelController(context.extensionUri, output);
-
-  // ── Terminal + status-bar controller ─────────────────────────────────────
   controller = new TerminalController(output, panel);
   context.subscriptions.push(
     vscode.window.onDidCloseTerminal((t) => controller!.handleTerminalClosed(t)),
   );
 
-  // ── Minimal activity-bar view (makes the container icon render) ──────────
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider(HOME_VIEW_ID, new HomeTreeProvider()),
   );
 
-  // ── Commands ────────────────────────────────────────────────────────────
   registerCommands(context, controller);
 
-  // ── Resolve the local server at activation ──────────────────────────────
   try {
-    const settings = readSettings();
-    const discovery = await discoverLocalServer(undefined, DEFAULT_HEALTH_TIMEOUT_MS);
-    const resolution = resolveServerTarget(settings, {
-      found: discovery.found,
-      baseUrl: discovery.found ? discovery.baseUrl : undefined,
-      health: discovery.found ? discovery.health : undefined,
-    });
-
-    if (resolution.status === "resolved") {
-      const target = resolution.target;
-      panel.setResolved(target);
-      output.appendLine(
-        `[omnigent] target: ${target.baseUrl} (hostType=${target.hostType}, source=${target.source})`,
-      );
-    } else {
-      output.appendLine(
-        `[omnigent] no local server (${resolution.reason}); run 'Omnigent: Start Server' or set omnigent.serverUrl`,
-      );
-    }
+    await controller.refreshServerState();
   } catch (err) {
     output.appendLine(
       `[omnigent] init error: ${err instanceof Error ? err.message : String(err)}`,
@@ -95,7 +62,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
-  // Dispose every terminal the extension spawned (server + agents).
   controller?.dispose();
   controller = undefined;
   panel?.dispose();

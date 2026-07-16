@@ -1,12 +1,18 @@
 /**
  * Owns every terminal the extension spawns + the server-state status bar.
  *
+ * Server state is driven by pidfile + /health discovery (or the
+ * omnigent.serverUrl override), NOT by which terminals we spawned — so a
+ * healthy shared server started outside the extension is still visible to
+ * Stop and the status bar. A generation token invalidates in-flight
+ * discovery/poll callbacks when a stop, terminal-close, or dispose supersedes
+ * them, so a stale poll can't resurrect state for a session that's gone.
+ *
  * Thin VS Code adapter: the pure decision logic (profile resolution, arg
  * building, URL/host classification, unique-id session keying, status-bar
  * formatting) lives in src/profiles.ts, src/config/, src/terminals/sessionRegistry.ts
- * and src/terminals/statusBar.ts — this class wires those to the vscode API
- * (createTerminal / showQuickPick / status bar / onDidCloseTerminal / execFile)
- * and is therefore not unit-tested; it is exercised via the built extension.
+ * and src/terminals/statusBar.ts. This class is exercised via the built
+ * extension, not unit-tested.
  */
 import * as vscode from "vscode";
 import { execFile } from "node:child_process";
@@ -40,6 +46,14 @@ export class TerminalController {
   private readonly agents = new SessionRegistry<Profile, vscode.Terminal>();
   private readonly statusBarItem: vscode.StatusBarItem;
   private pollTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Bumped on every event that invalidates pending async state work (stop,
+   * terminal close, dispose, a fresh poll). An in-flight discover()/poll
+   * captures the value at start and aborts if it has changed by the time its
+   * promise resolves — so a stale poll can't write state for a stopped
+   * session, and two near-simultaneous launches can't double-apply.
+   */
+  private generation = 0;
 
   constructor(
     private readonly output: vscode.OutputChannel,
@@ -57,12 +71,14 @@ export class TerminalController {
   // ── omnigent.startServer ───────────────────────────────────────────────
   /**
    * Launch `omnigent server` in a dedicated terminal unless a local server is
-   * already reachable. Idempotent — never starts a second server: if the
-   * extension owns the running server's terminal it focuses it, otherwise it
-   * toasts the detected URL.
+   * already reachable. Idempotent — never starts a second server: if one is
+   * running, it focuses the extension's own terminal or toasts the detected
+   * URL.
    */
   async startServer(): Promise<void> {
+    const gen = this.generation;
     const discovery = await this.discover();
+    if (gen !== this.generation) return;
     if (discovery.found && discovery.health === "ok") {
       if (this.serverTerminal) {
         this.serverTerminal.show();
@@ -71,7 +87,7 @@ export class TerminalController {
           `Omnigent server already running at ${discovery.baseUrl}.`,
         );
       }
-      this.setStatus("running", discovery.port);
+      this.reflectUrl(discovery.baseUrl);
       return;
     }
     if (this.serverTerminal) {
@@ -129,14 +145,20 @@ export class TerminalController {
 
   // ── omnigent.openAgentWebUI ───────────────────────────────────────────
   /**
-   * Resolve the server URL from discovery or the `omnigent.serverUrl`
-   * override. Localhost reuses the editor-beside iframe pane; non-localhost
-   * opens in the external browser (cookie/OIDC flows fail in the webview
-   * iframe).
+   * Resolve the server URL (override wins, skipping discovery) and open it.
+   * Localhost reuses the editor-beside iframe pane; non-localhost opens in
+   * the external browser (cookie/OIDC flows fail in the webview iframe).
    */
   async openAgentWebUI(): Promise<void> {
-    const target = await this.resolveWebUiTarget();
+    const gen = this.generation;
+    const target = await this.resolveTarget();
+    if (gen !== this.generation) {
+      return;
+    }
     if (!target) {
+      void vscode.window.showWarningMessage(
+        "Omnigent: no server URL detected yet. Start a server or set omnigent.serverUrl.",
+      );
       return;
     }
     if (target.hostType === "local") {
@@ -154,18 +176,27 @@ export class TerminalController {
 
   // ── omnigent.stop ──────────────────────────────────────────────────────
   /**
-   * Quick-pick between stopping the server and closing agent terminal(s). If
-   * only one category is active, act on it directly without the quick-pick.
+   * Quick-pick between stopping the server and closing agent terminal(s). A
+   * healthy local server found via discovery counts as "server active" even
+   * when the extension didn't start it — stopping that shared server is an
+   * explicit, confirmed choice. If only one category is active, act on it
+   * directly without the quick-pick.
    */
   async stop(): Promise<void> {
-    const serverActive = this.serverTerminal !== undefined;
+    this.invalidate();
+    const gen = this.generation;
     const agentActive = this.agents.size() > 0;
+    const discovery = await this.discover();
+    if (gen !== this.generation) {
+      return;
+    }
+    const serverActive = discovery.found && discovery.health === "ok";
     if (!serverActive && !agentActive) {
       void vscode.window.showInformationMessage("Omnigent: nothing is running.");
       return;
     }
     if (serverActive && !agentActive) {
-      await this.stopServer();
+      await this.stopServer(discovery);
       return;
     }
     if (agentActive && !serverActive) {
@@ -177,7 +208,7 @@ export class TerminalController {
       { placeHolder: "Stop what?" },
     );
     if (choice === "Stop server") {
-      await this.stopServer();
+      await this.stopServer(discovery);
     } else if (choice === "Close agent terminal(s)") {
       await this.closeAgentTerminals();
     }
@@ -199,6 +230,29 @@ export class TerminalController {
     }
   }
 
+  // ── server-state refresh (single source of truth) ──────────────────────
+  /**
+   * Recompute server state from the override (if set, no discovery) or
+   * pidfile + /health, and reflect it on the status bar and (for a local
+   * target) the editor panel. Called from activation and terminal-close so
+   * the status bar never drifts from reality.
+   */
+  async refreshServerState(): Promise<void> {
+    const gen = this.generation;
+    const target = await this.resolveTarget();
+    if (gen !== this.generation) {
+      return;
+    }
+    if (target) {
+      this.reflectUrl(target.baseUrl);
+      if (target.hostType === "local") {
+        this.panel.setResolved(target);
+      }
+    } else {
+      this.setStatus("stopped");
+    }
+  }
+
   // ── terminal lifecycle ─────────────────────────────────────────────────
   /** Clean up tracking when a spawned terminal closes (onDidCloseTerminal). */
   handleTerminalClosed(terminal: vscode.Terminal): void {
@@ -209,15 +263,13 @@ export class TerminalController {
     if (id !== undefined) {
       this.agents.delete(id);
     }
-    this.recomputeStatus();
+    this.invalidate();
+    void this.refreshServerState();
   }
 
   /** Dispose every terminal the extension spawned + the status bar. */
   dispose(): void {
-    if (this.pollTimer) {
-      clearTimeout(this.pollTimer);
-      this.pollTimer = undefined;
-    }
+    this.invalidate();
     this.serverTerminal?.dispose();
     this.serverTerminal = undefined;
     for (const s of this.agents.values()) {
@@ -229,27 +281,27 @@ export class TerminalController {
 
   // ── internals ─────────────────────────────────────────────────────────
   /**
-   * Stop a server. Only a server the extension started is stopped without
-   * confirmation; a server the extension merely discovered is shared (it may
-   * back other sessions) and requires the user to confirm before
-   * `omnigent server stop` tears it down.
+   * Stop a server. One the extension started is stopped outright; a shared
+   * server the extension only discovered warns (it may back other sessions)
+   * and requires confirmation before `omnigent server stop` tears it down.
    */
-  private async stopServer(): Promise<void> {
+  private async stopServer(discovery?: LocalDiscovery): Promise<void> {
     if (this.serverTerminal) {
       this.serverTerminal.dispose();
       this.serverTerminal = undefined;
-      this.recomputeStatus();
+      this.invalidate();
+      void this.refreshServerState();
       return;
     }
-    const discovery = await this.discover();
-    if (!discovery.found) {
+    const d = discovery ?? (await this.discover());
+    if (!d.found) {
       void vscode.window.showInformationMessage(
         "Omnigent: no running server found.",
       );
       return;
     }
     const confirm = await vscode.window.showWarningMessage(
-      `Omnigent server at ${discovery.baseUrl} was already running when the extension found it — stopping it may affect other sessions. Stop it anyway?`,
+      `Omnigent server at ${d.baseUrl} was already running when the extension found it — stopping it may affect other sessions. Stop it anyway?`,
       { modal: true },
       "Stop",
     );
@@ -270,7 +322,8 @@ export class TerminalController {
           );
           return;
         }
-        this.recomputeStatus();
+        this.invalidate();
+        void this.refreshServerState();
       },
     );
   }
@@ -333,33 +386,34 @@ export class TerminalController {
     return discoverLocalServer(undefined, DEFAULT_HEALTH_TIMEOUT_MS);
   }
 
-  private async resolveWebUiTarget(): Promise<ServerTarget | undefined> {
+  /**
+   * Resolve the server target. A non-empty `omnigent.serverUrl` override wins
+   * and skips pidfile/health discovery entirely; otherwise discovery decides.
+   */
+  private async resolveTarget(): Promise<ServerTarget | undefined> {
     const settings = readSettings();
+    if (settings.serverUrl.trim() !== "") {
+      const r = resolveServerTarget(settings, { found: false });
+      return r.status === "resolved" ? r.target : undefined;
+    }
     const discovery = await this.discover();
-    const resolution = resolveServerTarget(settings, {
+    const r = resolveServerTarget(settings, {
       found: discovery.found,
       baseUrl: discovery.found ? discovery.baseUrl : undefined,
       health: discovery.found ? discovery.health : undefined,
     });
-    if (resolution.status === "resolved") {
-      return resolution.target;
-    }
-    void vscode.window.showWarningMessage(
-      "Omnigent: no server URL detected yet. Start a server or set omnigent.serverUrl.",
-    );
-    return undefined;
+    return r.status === "resolved" ? r.target : undefined;
   }
 
   /**
    * Poll pidfile/health discovery until a server surfaces, then reflect its
-   * URL on the status bar and (when omnigent.autoOpenUI is set) open the WebUI.
-   * An explicit omnigent.serverUrl override short-circuits the poll. At most
-   * one poll runs at a time so concurrent launches share a single watcher.
+   * URL on the status bar and (when omnigent.autoOpenUI is set) open the
+   * WebUI. Cancels any prior poll first; the captured generation gates every
+   * state write so a poll superseded by a stop or a newer launch is ignored.
    */
   private pollUntilReady(): void {
-    if (this.pollTimer) {
-      return;
-    }
+    this.invalidate();
+    const gen = this.generation;
     const override = readSettings().serverUrl.trim();
     if (override) {
       this.reflectUrl(override);
@@ -371,6 +425,9 @@ export class TerminalController {
     let attempts = 0;
     const poll = (): void => {
       void this.discover().then((discovery) => {
+        if (gen !== this.generation) {
+          return;
+        }
         if (discovery.found && discovery.health === "ok") {
           this.pollTimer = undefined;
           this.reflectUrl(discovery.baseUrl);
@@ -403,17 +460,13 @@ export class TerminalController {
     this.output.appendLine(`[omnigent] server URL: ${baseUrl}`);
   }
 
-  private recomputeStatus(): void {
-    if (this.serverTerminal) {
-      this.setStatus("running");
-      return;
+  /** Cancel the poll timer and invalidate in-flight discovery callbacks. */
+  private invalidate(): void {
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = undefined;
     }
-    const override = readSettings().serverUrl.trim();
-    if (override) {
-      this.reflectUrl(override);
-      return;
-    }
-    this.setStatus("stopped");
+    this.generation++;
   }
 
   private setStatus(state: ServerState, port?: number): void {
