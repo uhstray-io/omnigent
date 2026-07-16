@@ -1,8 +1,8 @@
 {
   "name": "omnigent-vscode",
   "displayName": "Omnigent",
-  "description": "Open your running local Omnigent server inside VS Code, in an editor-beside iframe.",
-  "version": "0.1.0",
+  "description": "Start an Omnigent server, run agents in integrated terminals, and open the WebUI — all from VS Code.",
+  "version": "0.2.0",
   "publisher": "databricks",
   "license": "Apache-2.0",
   "icon": "media/omnigent-icon.png",
@@ -20,10 +20,52 @@
     "configuration": {
       "title": "Omnigent",
       "properties": {
+        "omnigent.agentConfigPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the Omnigent agent config passed to `omnigent run <configPath>`. Used only when `#omnigent.profiles#` is empty."
+        },
+        "omnigent.profiles": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Display name (falls back to configPath)." },
+              "configPath": { "type": "string", "description": "Path passed to `omnigent run`." },
+              "extraArgs": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Extra argv appended after the config path."
+              }
+            },
+            "required": ["configPath"]
+          },
+          "markdownDescription": "Agent profiles to launch from **Omnigent: Open Agent Terminal**. Each entry runs `omnigent run <configPath> [extraArgs...]` in a new terminal. Takes precedence over `#omnigent.agentConfigPath#`; a quick-pick appears when more than one is set."
+        },
         "omnigent.serverUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Manual Omnigent server URL override for a **localhost** server (e.g. `http://127.0.0.1:6767`). Leave empty to auto-discover a locally running Omnigent server. Non-localhost URLs are not supported in this build."
+          "markdownDescription": "Manual Omnigent server URL override (e.g. `http://127.0.0.1:6767` or a remote `https://…`). Leave empty to auto-discover a locally running server. A **localhost** URL opens in the editor-beside WebUI pane; a **non-localhost** URL opens in the external browser (cookie/OIDC flows fail in the webview iframe)."
+        },
+        "omnigent.autoOpenUI": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When enabled, auto-open the Agent WebUI once a server URL is detected after **Start Server** or **Open Agent Terminal**."
+        },
+        "omnigent.uiColumn": {
+          "type": "string",
+          "enum": ["beside", "active"],
+          "default": "beside",
+          "enumDescriptions": ["Open the WebUI pane beside the active editor.", "Open it in the active column."],
+          "description": "Where the local WebUI iframe pane opens."
+        },
+        "omnigent.terminalLocation": {
+          "type": "string",
+          "enum": ["editor", "panel"],
+          "default": "editor",
+          "enumDescriptions": ["Open agent/server terminals in the editor area.", "Open them in the terminal panel."],
+          "description": "Where agent terminals open."
         }
       }
     },
@@ -48,35 +90,58 @@
     "viewsWelcome": [
       {
         "view": "omnigent.home",
-        "contents": "Open the running Omnigent server UI in an editor tab.\n[Open Omnigent](command:omnigent.open)\nStart a local server with `omnigent server`, or set `omnigent.serverUrl` to a localhost URL."
+        "contents": "Start or run Omnigent from VS Code.\n[Start Server](command:omnigent.startServer)\n[Open Agent Terminal](command:omnigent.openAgentTerminal)\n[Open Agent WebUI](command:omnigent.openAgentWebUI)\nOr set `omnigent.serverUrl` to point at a running server."
       }
     ],
     "commands": [
       {
-        "command": "omnigent.open",
-        "title": "Omnigent: Open",
+        "command": "omnigent.startServer",
+        "title": "Omnigent: Start Server",
+        "icon": "media/omnigent-icon.svg"
+      },
+      {
+        "command": "omnigent.openAgentTerminal",
+        "title": "Omnigent: Open Agent Terminal",
+        "icon": "media/omnigent-icon.svg"
+      },
+      {
+        "command": "omnigent.openAgentWebUI",
+        "title": "Omnigent: Open Agent WebUI",
+        "icon": "media/omnigent-icon.svg"
+      },
+      {
+        "command": "omnigent.stop",
+        "title": "Omnigent: Stop",
+        "icon": "media/omnigent-icon.svg"
+      },
+      {
+        "command": "omnigent.showCommands",
+        "title": "Omnigent: Show Commands",
         "icon": "media/omnigent-icon.svg"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "omnigent.open",
+          "command": "omnigent.openAgentTerminal",
           "group": "navigation@99"
         }
       ],
       "commandPalette": [
-        {
-          "command": "omnigent.open"
-        }
+        { "command": "omnigent.startServer" },
+        { "command": "omnigent.openAgentTerminal" },
+        { "command": "omnigent.openAgentWebUI" },
+        { "command": "omnigent.stop" },
+        { "command": "omnigent.showCommands", "when": "false" }
       ]
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run build",
     "build": "node esbuild.js",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
-    "package": "vsce package"
+    "package": "npm run build && vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
